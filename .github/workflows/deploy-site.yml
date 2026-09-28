@@ -5,7 +5,7 @@ name: Deploy site
 # Source = "GitHub Actions", set once per repo.
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths: ["site/**"]
   workflow_dispatch:
 
