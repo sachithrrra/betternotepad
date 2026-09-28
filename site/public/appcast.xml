@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparkle's update feed. Add one <item> per release above the previous ones;
+  see https://sparkle-project.org/documentation/publishing/ for the fields and signing.
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     version="2.0">
+  <channel>
+    <title>Better Notepad Changelog</title>
+    <link>https://sachithrrra.github.io/betternotepad/appcast.xml</link>
+    <description>Updates to Better Notepad.</description>
+    <language>en</language>
+  </channel>
+</rss>

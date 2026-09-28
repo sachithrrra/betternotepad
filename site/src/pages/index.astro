@@ -1,0 +1,241 @@
+---
+const repo = "https://github.com/sachithrrra/betternotepad";
+// BASE_URL is "/betternotepad" (see astro.config.mjs); normalise the trailing slash.
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+// Shortcuts mirror the app's key bindings in app/src/main.rs.
+const features = [
+  ["⌘T", "Tabs", "Keep many files open in one window and flip between them with ⌃Tab."],
+  ["⌘H", "Find & replace", "Search and replace across the file, step through with F3."],
+  ["⌘G", "Go to line", "Jump straight to any line. Line and column always in the status bar."],
+  [".md", "Markdown preview", "Open a Markdown file and see it rendered live, side by side."],
+  ["⌘+", "Zoom", "Make text bigger or smaller, and ⌘0 to reset."],
+  ["UTF", "Respects your files", "Keeps encodings and line endings exactly as they were."],
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Better Notepad</title>
+    <link rel="icon" type="image/png" href={`${base}/notepad.png`} />
+    <meta name="description" content="A simple, fast plain-text editor for macOS." />
+    <link rel="preload" href={`${base}/fonts/Lilex-Regular.woff2`} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={`${base}/fonts/Lilex-Bold.woff2`} as="font" type="font/woff2" crossorigin />
+    <style set:html={`
+      @font-face { font-family: Lilex; font-weight: 400; font-display: swap; src: url(${base}/fonts/Lilex-Regular.woff2) format("woff2"); }
+      @font-face { font-family: Lilex; font-weight: 500; font-display: swap; src: url(${base}/fonts/Lilex-Medium.woff2) format("woff2"); }
+      @font-face { font-family: Lilex; font-weight: 700; font-display: swap; src: url(${base}/fonts/Lilex-Bold.woff2) format("woff2"); }
+    `} />
+  </head>
+  <body>
+    <nav>
+      <a class="logo" href={`${base}/`}><img src={`${base}/notepad.png`} alt="" width="28" height="28" />better notepad</a>
+      <a class="nav-link" href={repo}>GitHub ↗</a>
+    </nav>
+
+    <header class="hero">
+      <p class="pill">macOS · free &amp; open source</p>
+      <h1>Just text.<br />Nothing in the way<span class="caret"></span></h1>
+      <p class="tagline">Better Notepad is a simple, fast plain-text editor for macOS. Opens instantly, stays out of your way.</p>
+      <div class="actions">
+        <a class="btn primary" href={`${repo}/releases/latest`}>Download for Mac</a>
+        <a class="btn" href={repo}>View source</a>
+      </div>
+    </header>
+
+    <figure class="shot">
+      <img src={`${base}/screenshot.png`} alt="Better Notepad editing a Markdown file with live preview" width="2024" height="1570" />
+    </figure>
+
+    <section class="features">
+      <h2 class="section-title">Everything you need.<br /><span>Nothing you don't.</span></h2>
+      <div class="grid">
+        {features.map(([key, title, body]) => (
+          <div class="feature">
+            <kbd>{key}</kbd>
+            <h3>{title}</h3>
+            <p>{body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section class="cta">
+      <h2>Write something.</h2>
+      <a class="btn primary" href={`${repo}/releases/latest`}>Download Better Notepad</a>
+    </section>
+
+    <footer>
+      <span>© Better Notepad</span>
+      <span><a href={repo}>GitHub</a></span>
+    </footer>
+
+    <style>
+      :root {
+        --bg: #fbfbfa;
+        --fg: #16171a;
+        --muted: #6b6f76;
+        --card: #ffffff;
+        --border: #e4e4e2;
+        --accent: #2f6bff;
+        --accent-fg: #ffffff;
+        --glow: rgba(47, 107, 255, 0.18);
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111214;
+          --fg: #ececee;
+          --muted: #8b8d94;
+          --card: #18191c;
+          --border: #26272b;
+          --accent: #5b8cff;
+          --accent-fg: #0b0c0e;
+          --glow: rgba(91, 140, 255, 0.22);
+          color-scheme: dark;
+        }
+      }
+      * { box-sizing: border-box; }
+      html { -webkit-text-size-adjust: 100%; }
+      body {
+        margin: 0;
+        padding: 0 16px;
+        font: 15px/1.6 Lilex, ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--fg);
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+        overflow-x: hidden;
+      }
+      a { color: inherit; }
+
+      nav {
+        max-width: 64rem;
+        margin: 0 auto;
+        padding: 1.5rem 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .logo { font-weight: 700; text-decoration: none; display: flex; align-items: center; gap: 0.5rem; }
+      .logo img { display: block; }
+      .nav-link { color: var(--muted); text-decoration: none; font-size: 0.9rem; }
+      .nav-link:hover { color: var(--fg); }
+
+      .hero { max-width: 44rem; margin: 0 auto; padding: 5rem 0 3.5rem; text-align: center; }
+      .pill {
+        display: inline-block;
+        margin: 0 0 1.75rem;
+        padding: 0.3rem 0.8rem;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-size: 0.8rem;
+        color: var(--muted);
+        background: var(--card);
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(2.2rem, 7vw, 4.25rem);
+        font-weight: 700;
+        line-height: 1.08;
+        letter-spacing: -0.04em;
+        text-wrap: balance;
+      }
+      .caret {
+        display: inline-block;
+        width: 0.08em;
+        height: 0.9em;
+        margin-left: 0.08em;
+        vertical-align: -0.05em;
+        background: var(--accent);
+        animation: blink 1.1s steps(1) infinite;
+      }
+      @keyframes blink { 50% { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+      .tagline { max-width: 34rem; margin: 1.5rem auto 2.25rem; color: var(--muted); font-size: 1.05rem; }
+
+      .actions { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+      .btn {
+        display: inline-block;
+        padding: 0.8rem 1.4rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        font: inherit;
+        font-weight: 500;
+        text-decoration: none;
+        transition: transform 0.15s, border-color 0.15s, filter 0.15s;
+      }
+      .btn:hover { transform: translateY(-1px); border-color: var(--muted); }
+      .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 700; }
+      .btn.primary:hover { filter: brightness(1.1); }
+
+      .shot { position: relative; max-width: 64rem; margin: 0 auto; }
+      .shot::before {
+        content: "";
+        position: absolute;
+        inset: 15% 10% 5%;
+        background: var(--glow);
+        filter: blur(80px);
+        z-index: -1;
+      }
+      .shot img { display: block; width: 100%; height: auto; }
+
+      .features { max-width: 64rem; margin: 6rem auto; }
+      .section-title {
+        margin: 0 0 2.5rem;
+        font-size: clamp(1.6rem, 4vw, 2.25rem);
+        line-height: 1.15;
+        letter-spacing: -0.03em;
+        text-align: center;
+      }
+      .section-title span { color: var(--muted); }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr));
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .feature { padding: 1.75rem; background: var(--card); }
+      kbd {
+        display: inline-block;
+        min-width: 2.2rem;
+        padding: 0.15rem 0.5rem;
+        border: 1px solid var(--border);
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        font: inherit;
+        font-size: 0.8rem;
+        font-weight: 500;
+        text-align: center;
+        color: var(--accent);
+        background: var(--bg);
+      }
+      .feature h3 { margin: 1rem 0 0.35rem; font-size: 1rem; }
+      .feature p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+      .cta { max-width: 64rem; margin: 0 auto 6rem; text-align: center; }
+      .cta h2 { margin: 0 0 1.5rem; font-size: clamp(1.6rem, 4vw, 2.25rem); letter-spacing: -0.03em; }
+
+      footer {
+        max-width: 64rem;
+        margin: 0 auto;
+        padding: 2rem 0 3rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1.5rem;
+        justify-content: space-between;
+        border-top: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      footer a { text-decoration: none; }
+      footer a:hover { color: var(--fg); }
+    </style>
+  </body>
+</html>
