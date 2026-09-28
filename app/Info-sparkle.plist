@@ -1,5 +1,5 @@
   <key>SUFeedURL</key>
-  <string>https://sachithrrra.github.io/betternotepad/appcast.xml</string>
+  <string>https://betternotepad.sach.cc/appcast.xml</string>
   <key>SUEnableAutomaticChecks</key>
   <true/>
   <key>SUScheduledCheckInterval</key>
