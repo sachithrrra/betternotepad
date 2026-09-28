@@ -932,6 +932,9 @@ impl Render for Notepad {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.open_paths(paths.paths().to_vec(), window, cx);
+            }))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::open_recent))
@@ -969,7 +972,10 @@ impl Render for Notepad {
                         h_resizable(split_id)
                             .with_handle_appearance(divider)
                             .child(resizable_panel().child(textarea))
-                            .child(resizable_panel().px_4().py_2().child(preview.size_full())),
+                            // No `pr_*`: the scrollbar is painted inset to the
+                            // panel's own bounds, so right padding here would
+                            // pull it away from the window edge.
+                            .child(resizable_panel().pl_4().py_2().child(preview.size_full())),
                     ),
                 }
             }))
