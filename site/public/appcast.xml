@@ -11,5 +11,17 @@
     <link>https://sachithrrra.github.io/betternotepad/appcast.xml</link>
     <description>Updates to Better Notepad.</description>
     <language>en</language>
+    <item>
+      <title>Version 1.0.0</title>
+      <pubDate>Mon, 28 Sep 2026 00:00:00 +0000</pubDate>
+      <sparkle:version>20260928.110127</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/sachithrrra/betternotepad/releases/download/v1.0.0/BetterNotepad-1.0.0.zip"
+        sparkle:edSignature="hAAlC25qS9zPk+rrWeBy3PEs7E4o4AIbkZsso4lElTjqXxQxcOHsmbbQklUMnIJHYmf6Qn7Lg1FYB5i6T/ipAA=="
+        length="8638113"
+        type="application/octet-stream" />
+    </item>
   </channel>
 </rss>
