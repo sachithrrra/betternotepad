@@ -1511,21 +1511,28 @@ fn setting_row(
     let theme = cx.theme();
     h_flex()
         .gap_4()
-        .px_4()
-        .py_3()
+        .px_3()
+        .py_2p5()
+        .overflow_hidden()
         .rounded(theme.radius)
         .border_1()
         .border_color(theme.border)
         .bg(theme.secondary)
         .child(
-            v_flex().flex_1().gap_0p5().child(title).child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(hint),
-            ),
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(div().truncate().child(title))
+                .child(
+                    div()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(hint),
+                ),
         )
-        .child(control)
+        .child(div().flex_none().child(control))
 }
 
 fn set_toggle(update: fn(&mut Settings, bool)) -> impl Fn(&bool, &mut Window, &mut App) {
@@ -1544,12 +1551,17 @@ impl Render for SettingsView {
             .position(|&a| a == settings.appearance);
 
         v_flex()
+            .id("settings")
             .size_full()
             .p_5()
             .gap_2()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            // Controls stop propagation on their own clicks, so this only fires for
+            // clicks on the window's blank space, clearing the focus ring a Select
+            // trigger keeps after Confirm.
+            .on_click(|_, window, cx| window.blur(cx))
             .child(
                 div()
                     .text_xl()
@@ -1603,6 +1615,9 @@ impl Render for SettingsView {
             ))
             .child(
                 div()
+                    .flex_1()
+                    .items_end()
+                    .flex()
                     .pt_2()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
