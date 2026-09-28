@@ -905,6 +905,8 @@ impl Render for Notepad {
                 ("preview", doc.id().as_u64() as usize),
                 editor.read(cx).value(),
             )
+            .font_family(settings.font_family.clone())
+            .text_size(px(font_px))
             // Inline code defaults to the blue `accent` (it tints links in tables), and
             // header text to `muted_foreground`, which reads as disabled.
             .style(
