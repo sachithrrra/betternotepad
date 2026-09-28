@@ -1,7 +1,10 @@
 mod encoding;
+mod updater;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use encoding::{Encoding, Eol, decode, encode};
@@ -50,6 +53,7 @@ actions!(
         ToggleStatusBar,
         About,
         ClearRecent,
+        CheckForUpdates,
     ]
 );
 
@@ -79,6 +83,9 @@ struct Settings {
 }
 impl Global for Settings {}
 
+struct Updater(updater::Controller);
+impl Global for Updater {}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Appearance {
     System,
@@ -98,12 +105,34 @@ impl Appearance {
     }
 }
 
-/// Where the recent-files list lives; none in tests so they can't touch the real one.
-fn recent_file() -> Option<PathBuf> {
+/// Where app data lives; none in tests so they can't touch the real one.
+fn support_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    Some(std::env::home_dir()?.join("Library/Application Support/Better Notepad/recent.txt"))
+    Some(std::env::home_dir()?.join("Library/Application Support/Better Notepad"))
+}
+
+fn recent_file() -> Option<PathBuf> {
+    Some(support_dir()?.join("recent.txt"))
+}
+
+/// On first launch (no support dir yet), writes the welcome notes there and
+/// returns their paths to open; empty on every later launch.
+fn first_run_welcome() -> Vec<PathBuf> {
+    let Some(dir) = support_dir().filter(|d| !d.exists()) else {
+        return Vec::new();
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    [
+        ("Welcome.txt", include_str!("../welcome/welcome.txt")),
+        ("Welcome.md", include_str!("../welcome/welcome.md")),
+    ]
+    .into_iter()
+    .map(|(name, text)| (dir.join(name), text))
+    .filter(|(path, text)| std::fs::write(path, text).is_ok())
+    .map(|(path, _)| path)
+    .collect()
 }
 
 /// Saved recent files that still exist, one path per line.
@@ -982,6 +1011,7 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
     if app_menu {
         menus.push(Menu::new("Better Notepad").items([
             MenuItem::action("About Better Notepad", About),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
@@ -1063,7 +1093,10 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
             MenuItem::action("Next Tab", NextTab),
             MenuItem::action("Previous Tab", PreviousTab),
         ]),
-        Menu::new("Help").items([MenuItem::action("About Better Notepad", About)]),
+        Menu::new("Help").items([
+            MenuItem::action("About Better Notepad", About),
+            MenuItem::action("Check for Updates…", CheckForUpdates),
+        ]),
     ]);
     menus
 }
@@ -1256,10 +1289,14 @@ fn init(cx: &mut App) {
     });
     bind_keys(cx);
     set_menus(cx);
+    cx.set_global(Updater(updater::start()));
 
     cx.on_action(|_: &NewWindow, cx| open_window(Vec::new(), cx));
     cx.on_action(|_: &OpenSettings, cx| open_settings(cx));
     cx.on_action(|_: &About, cx| open_about(cx));
+    cx.on_action(|_: &CheckForUpdates, cx| {
+        updater::check_for_updates(cx.global::<Updater>().0);
+    });
     cx.on_action(|_: &ClearRecent, cx| set_recent(cx, Vec::clear));
     cx.on_action(|_: &ToggleWordWrap, cx| {
         cx.update_global::<Settings, _>(|s, _| s.word_wrap = !s.word_wrap);
@@ -1270,12 +1307,16 @@ fn init(cx: &mut App) {
         set_menus(cx);
     });
     // Each window runs its own unsaved-changes prompts; the app exits with the last one.
+    // Deferred: Quit usually arrives while its window is mid-update, and
+    // updating that window from inside itself fails.
     cx.on_action(|_: &Quit, cx| {
-        for window in cx.windows() {
-            let _ = window.update(cx, |_, window, cx| {
-                window.dispatch_action(Box::new(CloseWindow), cx)
-            });
-        }
+        cx.defer(|cx| {
+            for window in cx.windows() {
+                let _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(CloseWindow), cx)
+                });
+            }
+        })
     });
 }
 
@@ -1562,15 +1603,42 @@ impl Render for SettingsView {
     }
 }
 
+/// Decodes a `file://…` URL, as macOS delivers for "Open With" and drag-onto-dock, into a path.
+fn url_to_path(url: &str) -> Option<PathBuf> {
+    let path = url.strip_prefix("file://")?;
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut rest = path.bytes();
+    while let Some(b) = rest.next() {
+        if b == b'%' {
+            let hex: String = [rest.next()?, rest.next()?]
+                .map(|b| b as char)
+                .into_iter()
+                .collect();
+            bytes.push(u8::from_str_radix(&hex, 16).ok()?);
+        } else {
+            bytes.push(b);
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
+}
+
 fn main() {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     #[cfg(feature = "snapshot")]
     if let Ok(out) = std::env::var("NP_SNAPSHOT") {
         return snapshot(&out, paths);
     }
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
+    let (open_tx, open_rx) = async_channel::unbounded::<Vec<PathBuf>>();
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // Finder ("Open With", double-click, drag-onto-dock-icon) delivers files as
+    // `file://` URLs here, not as argv — this fires both at launch and while running.
+    app.on_open_urls(move |urls| {
+        let paths: Vec<PathBuf> = urls.iter().filter_map(|u| url_to_path(u)).collect();
+        if !paths.is_empty() {
+            open_tx.try_send(paths).ok();
+        }
+    });
+    app.run(move |cx| {
             init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
@@ -1578,8 +1646,32 @@ fn main() {
                 }
             })
             .detach();
-            open_window(paths, cx);
             cx.activate(true);
+
+            let opened = Rc::new(Cell::new(!paths.is_empty()));
+            if !paths.is_empty() {
+                open_window(paths, cx);
+            } else {
+                // A Finder-initiated launch delivers its file via `on_open_urls` shortly
+                // after this closure runs; wait a beat before defaulting to a blank window.
+                let opened = opened.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    if !opened.replace(true) {
+                        cx.update(|cx| open_window(first_run_welcome(), cx));
+                    }
+                })
+                .detach();
+            }
+            cx.spawn(async move |cx| {
+                while let Ok(paths) = open_rx.recv().await {
+                    opened.set(true);
+                    cx.update(|cx| open_window(paths, cx));
+                }
+            })
+            .detach();
         });
 }
 
@@ -1646,7 +1738,7 @@ fn snapshot(out: &str, paths: Vec<PathBuf>) {
 
 #[cfg(test)]
 mod ui_tests {
-    use super::{About, CloseTab, Encoding, GoTo, NewTab, Notepad, init};
+    use super::{About, CloseTab, Encoding, GoTo, NewTab, Notepad, Quit, init};
     use gpui_kit::component::{Root, WindowExt as _};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, ElementId, Entity, TestAppContext, px, size};
@@ -1694,6 +1786,15 @@ mod ui_tests {
             assert!(window.has_active_dialog(cx))
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn quit_closes_clean_windows(cx: &mut TestAppContext) {
+        let (handle, _) = open(cx);
+        cx.update_window(handle, |_, window, cx| window.dispatch_action(Box::new(Quit), cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.windows().len()), 0);
     }
 
     #[gpui_kit::test]

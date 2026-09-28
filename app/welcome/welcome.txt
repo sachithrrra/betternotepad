@@ -1,0 +1,19 @@
+Welcome to Better Notepad
+
+A plain-text editor that stays out of your way. No accounts, no cloud,
+no formatting — just text, saved where you put it.
+
+A few things worth knowing:
+
+  - Tabs: Cmd+T for a new tab, Ctrl+Tab to switch, Cmd+W to close.
+  - Find & replace: Cmd+F and Cmd+H. F3 jumps to the next match.
+  - Go to line: Cmd+G.
+  - Insert time/date: F5.
+  - Zoom: Cmd+= / Cmd+- / Cmd+0.
+  - Word wrap, status bar, font and theme live in Settings (Cmd+,).
+
+Better Notepad opens any text file, keeps its encoding and line endings,
+and shows up in Finder's "Open With" menu.
+
+This file is yours — edit it, keep it as a scratchpad, or close it.
+It won't come back.

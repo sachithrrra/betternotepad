@@ -1,1 +1,6 @@
 target/
+app/vendor/
+files
+site/node_modules/
+site/dist/
+site/.astro/

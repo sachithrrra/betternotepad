@@ -1,0 +1,11 @@
+  <key>SUFeedURL</key>
+  <string>https://sachithrrra.github.io/betternotepad/appcast.xml</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUScheduledCheckInterval</key>
+  <integer>86400</integer>
+  <!-- Replace with the output of vendor/bin/generate_keys before shipping a
+       signed release. Sparkle refuses to install
+       an update whose signature doesn't match this key. -->
+  <key>SUPublicEDKey</key>
+  <string>1zAku/kJqcisi/4fqrO8jM2X5Y9T6BvczA4ompL667k=</string>

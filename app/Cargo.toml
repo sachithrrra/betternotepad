@@ -1,19 +1,30 @@
 [package]
-name = "better-notepad"
+name = "betternotepad"
 version = "1.0.0"
 edition = "2024"
 description = "A simple, fast plain-text editor for macOS."
 
 [package.metadata.bundle]
 name = "Better Notepad"
-identifier = "com.betternotepad.app"
+identifier = "xyz.kronz.betternotepad"
 category = "public.app-category.productivity"
 short_description = "A simple, fast plain-text editor for macOS."
-osx_minimum_system_version = "11.0"
+icon = ["icons/AppIcon.icns"]
+[package.metadata.bundle.osx]
+minimum_system_version = "11.0"
+# Registers Better Notepad in Finder's "Open With" menu for any file (see main.rs on_open_urls),
+# and Sparkle's feed/key (see src/updater.rs).
+info_plist_exts = ["Info-document-types.plist", "Info-sparkle.plist"]
+# `cargo bundle` fails if this is missing, so run scripts/fetch-sparkle.sh first
+# (plain `cargo build`/`cargo run`/`cargo test` don't need it).
+frameworks = ["vendor/Sparkle.framework"]
+
 [dependencies]
 gpui-kit = "0.6.6"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+async-channel = "2"
+objc = "0.2"
 
 [features]
 # Dev only: off-screen PNG render of the window (see `snapshot` in main.rs).
