@@ -1,0 +1,26 @@
+[package]
+name = "better-notepad"
+version = "1.0.0"
+edition = "2024"
+description = "A simple, fast plain-text editor for macOS."
+
+[package.metadata.bundle]
+name = "Better Notepad"
+identifier = "com.betternotepad.app"
+category = "public.app-category.productivity"
+short_description = "A simple, fast plain-text editor for macOS."
+osx_minimum_system_version = "11.0"
+[dependencies]
+gpui-kit = "0.6.6"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[features]
+# Dev only: off-screen PNG render of the window (see `snapshot` in main.rs).
+snapshot = ["gpui-kit/test-support"]
+
+[profile.release]
+strip = true
+
+[dev-dependencies]
+gpui-kit = { version = "0.6.6", features = ["test-support"] }
