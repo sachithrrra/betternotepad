@@ -2,6 +2,8 @@
 
 A simple, fast plain-text editor for macOS.
 
+![Better Notepad screenshot](screenshot.png)
+
 ## Structure
 
 - [`app/`](app) — the macOS app (Rust, [gpui-kit](https://github.com/longbridge/gpui-kit))
