@@ -1,4 +1,5 @@
 mod encoding;
+mod export;
 mod updater;
 
 use std::cell::Cell;
@@ -8,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use encoding::{Encoding, Eol, decode, encode};
+use export::ExportFormat;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, IndexPath, Root, Selectable as _, Sizable as _, Theme, ThemeConfig,
     ThemeMode, WindowExt as _,
@@ -61,6 +63,11 @@ actions!(
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = notepad, no_json)]
 struct OpenRecent(PathBuf);
+
+/// Exports the current tab's text to another file format (File > Export).
+#[derive(Clone, Copy, PartialEq, Debug, Action)]
+#[action(namespace = notepad, no_json)]
+struct Export(ExportFormat);
 
 const MAX_RECENT: usize = 10;
 
@@ -496,6 +503,57 @@ impl Notepad {
         })
     }
 
+    /// Exports the tab's text as a PDF or DOCX (markdown rendered like the preview), always prompting for a new path.
+    /// Never touches `doc.path`/`dirty`: this is a side copy, not a save.
+    async fn export_flow(
+        this: WeakEntity<Self>,
+        id: EntityId,
+        format: ExportFormat,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<()> {
+        let Some((text, current_path, markdown, font)) = this.read_with(cx, |this, cx| {
+            this.doc_ix(id).map(|ix| {
+                let doc = &this.docs[ix];
+                let settings = cx.global::<Settings>();
+                (
+                    doc.editor.read(cx).value().to_string(),
+                    doc.path.clone(),
+                    doc.is_markdown(),
+                    (settings.font_family.to_string(), settings.font_size),
+                )
+            })
+        })?
+        else {
+            return Ok(());
+        };
+        let dir = current_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(std::env::home_dir)
+            .unwrap_or_default();
+        let stem = current_path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map_or("Untitled".into(), |s| s.to_string_lossy().into_owned());
+        let name = format!("{stem}.{}", format.extension());
+        let picked = cx.update(|_, cx| cx.prompt_for_new_path(&dir, Some(&name)))?;
+        let Some(path) = picked.await?? else {
+            return Ok(());
+        };
+        if let Err(err) = format.write(&text, markdown, &font.0, font.1, &path) {
+            this.update_in(cx, |this, window, cx| {
+                this.alert(
+                    &format!("Cannot export {}", path.display()),
+                    &err.to_string(),
+                    window,
+                    cx,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     /// The "Do you want to save changes?" gate. Resolves to true when the tab may be discarded.
     async fn confirm_discard(
         this: WeakEntity<Self>,
@@ -620,6 +678,15 @@ impl Notepad {
         let id = self.doc().id();
         cx.spawn_in(window, async move |this, cx| {
             Self::save_flow(this, id, true, cx).await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn export(&mut self, action: &Export, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.doc().id();
+        let format = action.0;
+        cx.spawn_in(window, async move |this, cx| {
+            Self::export_flow(this, id, format, cx).await
         })
         .detach_and_log_err(cx);
     }
@@ -942,6 +1009,7 @@ impl Render for Notepad {
             .on_action(cx.listener(Self::open_recent))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::save_as))
+            .on_action(cx.listener(Self::export))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::next_tab))
@@ -1048,6 +1116,10 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
                 ),
                 MenuItem::action("Save", Save),
                 MenuItem::action("Save As…", SaveAs),
+                MenuItem::submenu(Menu::new("Export").items([
+                    MenuItem::action("PDF", Export(export::ExportFormat::Pdf)),
+                    MenuItem::action("DOCX", Export(export::ExportFormat::Docx)),
+                ])),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Window", CloseWindow),
@@ -1270,12 +1342,16 @@ fn install_theme(cx: &mut App) {
 }
 
 /// Lilex isn't a system font, so it ships inside the binary (OFL, see fonts/OFL.txt).
+/// Export embeds these too, since CoreText can't see them.
+const LILEX_REGULAR: &[u8] = include_bytes!("../fonts/Lilex-Regular.ttf");
+const LILEX_BOLD: &[u8] = include_bytes!("../fonts/Lilex-Bold.ttf");
+
 fn load_fonts(cx: &App) {
     let fonts = [
-        include_bytes!("../fonts/Lilex-Regular.ttf").as_slice(),
+        LILEX_REGULAR,
         include_bytes!("../fonts/Lilex-Medium.ttf"),
         include_bytes!("../fonts/Lilex-SemiBold.ttf"),
-        include_bytes!("../fonts/Lilex-Bold.ttf"),
+        LILEX_BOLD,
     ];
     cx.text_system()
         .add_fonts(fonts.map(std::borrow::Cow::Borrowed).to_vec())
@@ -1662,40 +1738,40 @@ fn main() {
         }
     });
     app.run(move |cx| {
-            init(cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-            cx.activate(true);
-
-            let opened = Rc::new(Cell::new(!paths.is_empty()));
-            if !paths.is_empty() {
-                open_window(paths, cx);
-            } else {
-                // A Finder-initiated launch delivers its file via `on_open_urls` shortly
-                // after this closure runs; wait a beat before defaulting to a blank window.
-                let opened = opened.clone();
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(100))
-                        .await;
-                    if !opened.replace(true) {
-                        cx.update(|cx| open_window(first_run_welcome(), cx));
-                    }
-                })
-                .detach();
+        init(cx);
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
             }
+        })
+        .detach();
+        cx.activate(true);
+
+        let opened = Rc::new(Cell::new(!paths.is_empty()));
+        if !paths.is_empty() {
+            open_window(paths, cx);
+        } else {
+            // A Finder-initiated launch delivers its file via `on_open_urls` shortly
+            // after this closure runs; wait a beat before defaulting to a blank window.
+            let opened = opened.clone();
             cx.spawn(async move |cx| {
-                while let Ok(paths) = open_rx.recv().await {
-                    opened.set(true);
-                    cx.update(|cx| open_window(paths, cx));
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                if !opened.replace(true) {
+                    cx.update(|cx| open_window(first_run_welcome(), cx));
                 }
             })
             .detach();
-        });
+        }
+        cx.spawn(async move |cx| {
+            while let Ok(paths) = open_rx.recv().await {
+                opened.set(true);
+                cx.update(|cx| open_window(paths, cx));
+            }
+        })
+        .detach();
+    });
 }
 
 /// Dev only: render a window off-screen to a PNG so the UI can be reviewed without a display.
@@ -1814,8 +1890,10 @@ mod ui_tests {
     #[gpui_kit::test]
     fn quit_closes_clean_windows(cx: &mut TestAppContext) {
         let (handle, _) = open(cx);
-        cx.update_window(handle, |_, window, cx| window.dispatch_action(Box::new(Quit), cx))
-            .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.dispatch_action(Box::new(Quit), cx)
+        })
+        .unwrap();
         cx.run_until_parked();
         assert_eq!(cx.read(|cx| cx.windows().len()), 0);
     }

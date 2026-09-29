@@ -25,6 +25,15 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-channel = "2"
 objc = "0.2"
+# No default "html" (a whole HTML engine); "text_layout" is needed to subset embedded fonts,
+# otherwise every export carries the full font files (~200KB+ each).
+printpdf = { version = "0.12.8", default-features = false, features = ["text_layout"] }
+docx-rs = "0.4.22"
+# Already in the tree via gpui-kit (its markdown preview); used to render .md exports.
+markdown = "1"
+# Already in the tree via gpui; finds the settings font's files so PDF export can embed it.
+core-text = "21"
+core-foundation = "0.10"
 
 [features]
 # Dev only: off-screen PNG render of the window (see `snapshot` in main.rs).
