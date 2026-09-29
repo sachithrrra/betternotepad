@@ -71,6 +71,39 @@ struct Export(ExportFormat);
 
 const MAX_RECENT: usize = 10;
 
+/// The Notion-style `/` menu in markdown tabs: label, search keys, and the markdown
+/// it inserts (`|` marks where the cursor lands, else the end).
+const BLOCKS: [(&str, &str, &str); 9] = [
+    ("Heading 1", "heading1 h1 title", "# "),
+    ("Heading 2", "heading2 h2", "## "),
+    ("Heading 3", "heading3 h3", "### "),
+    ("Bulleted list", "bulletedlist ul", "- "),
+    ("Numbered list", "numberedlist ol", "1. "),
+    ("To-do list", "todolist checkbox task", "- [ ] "),
+    ("Quote", "quote blockquote", "> "),
+    ("Code block", "codeblock pre", "```\n|\n```"),
+    ("Divider", "divider hr line", "---\n"),
+];
+
+/// A `/query` typed at the start of a line (after any indent): the `/`'s byte
+/// offset in `line` and the query.
+fn slash_query(line: &str) -> Option<(usize, &str)> {
+    let start = line.len() - line.trim_start().len();
+    let query = line[start..].strip_prefix('/')?;
+    query
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric())
+        .then_some((start, query))
+}
+
+/// Indexes into `BLOCKS` whose keys contain the query.
+fn slash_matches(query: &str) -> Vec<usize> {
+    let query = query.to_ascii_lowercase();
+    (0..BLOCKS.len())
+        .filter(|&ix| BLOCKS[ix].1.contains(&query))
+        .collect()
+}
+
 const DEFAULT_FONT: &str = "Lilex";
 /// Line height as a multiple of the editor font size.
 const LINE_SPACING: f32 = 1.45;
@@ -244,6 +277,14 @@ impl Doc {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SlashKey {
+    Up,
+    Down,
+    Accept,
+    Dismiss,
+}
+
 struct Notepad {
     focus_handle: FocusHandle,
     docs: Vec<Doc>,
@@ -251,6 +292,10 @@ struct Notepad {
     zoom: u32,
     /// A native prompt is showing; GPUI panics on a second one.
     prompting: bool,
+    /// Highlighted row of the `/` menu.
+    slash_selected: usize,
+    /// The `/` whose menu Escape closed, so typing on doesn't reopen it.
+    slash_dismissed: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -293,6 +338,8 @@ impl Notepad {
             active: 0,
             zoom: 100,
             prompting: false,
+            slash_selected: 0,
+            slash_dismissed: None,
             _subscriptions: subscriptions,
         };
         notepad.add_tab(window, cx);
@@ -322,6 +369,11 @@ impl Notepad {
         let subscriptions = vec![
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.slash_selected = 0;
+                    // Deleting the dismissed `/` lets a new one open the menu again.
+                    if this.slash_trigger(cx).map(|t| t.0) != this.slash_dismissed {
+                        this.slash_dismissed = None;
+                    }
                     this.refresh_dirty(editor.entity_id(), window, cx);
                 }
             }),
@@ -791,6 +843,110 @@ impl Notepad {
         self.refresh_dirty(editor.entity_id(), window, cx);
     }
 
+    // ---- `/` menu ----
+
+    /// A `/query` before the cursor in a markdown tab: the `/`'s offset and the query.
+    fn slash_trigger(&self, cx: &App) -> Option<(usize, String)> {
+        let doc = self.doc();
+        if !doc.is_markdown() {
+            return None;
+        }
+        let editor = doc.editor.read(cx);
+        let cursor = editor.selected_range();
+        if !cursor.is_empty() {
+            return None;
+        }
+        let text = editor.text();
+        let line_start = text.line_start_offset(text.offset_to_point(cursor.end).row);
+        let line = text.slice(line_start..cursor.end).to_string();
+        let (col, query) = slash_query(&line)?;
+        Some((line_start + col, query.to_string()))
+    }
+
+    /// The open menu: the `/`'s offset and the matching `BLOCKS`.
+    fn slash_menu(&self, cx: &App) -> Option<(usize, Vec<usize>)> {
+        let (start, query) = self.slash_trigger(cx)?;
+        let matches = slash_matches(&query);
+        (Some(start) != self.slash_dismissed && !matches.is_empty()).then_some((start, matches))
+    }
+
+    /// Swaps `/query` for the chosen block's markdown.
+    fn slash_apply(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((start, matches)) = self.slash_menu(cx) else {
+            return;
+        };
+        let insert = BLOCKS[matches[row.min(matches.len() - 1)]].2;
+        let (before, after) = insert.split_once('|').unwrap_or((insert, ""));
+        let editor = self.editor();
+        editor.update(cx, |editor, cx| {
+            let end = editor.cursor();
+            editor.set_selected_range(start..end, cx);
+            editor.replace(format!("{before}{after}"), window, cx);
+            let cursor = start + before.len();
+            editor.set_selected_range(cursor..cursor, cx);
+        });
+        self.refresh_dirty(editor.entity_id(), window, cx);
+    }
+
+    /// Up/Down/Enter/Tab/Escape go to the menu while it's open, else on to the text area.
+    fn slash_key(&mut self, key: SlashKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((start, matches)) = self.slash_menu(cx) else {
+            return;
+        };
+        // Capture-phase listeners don't stop the action on their own.
+        cx.stop_propagation();
+        let len = matches.len();
+        match key {
+            SlashKey::Up => self.slash_selected = (self.slash_selected + len - 1) % len,
+            SlashKey::Down => self.slash_selected = (self.slash_selected + 1) % len,
+            SlashKey::Accept => self.slash_apply(self.slash_selected, window, cx),
+            SlashKey::Dismiss => self.slash_dismissed = Some(start),
+        }
+        cx.notify();
+    }
+
+    fn render_slash_menu(&self, matches: &[usize], cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.slash_selected.min(matches.len() - 1);
+        let theme = cx.theme();
+        v_flex()
+            .id("slash-menu")
+            .w(px(240.))
+            .p_1()
+            .text_sm()
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .shadow_md()
+            .children(matches.iter().enumerate().map(|(row, &ix)| {
+                let (label, _, insert) = BLOCKS[ix];
+                let hint = insert.lines().next().unwrap_or_default().trim();
+                h_flex()
+                    .id(("slash", row))
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .map(|this| {
+                        if row == selected {
+                            this.bg(theme.accent).text_color(theme.accent_foreground)
+                        } else {
+                            this.text_color(theme.foreground)
+                        }
+                    })
+                    .child(label)
+                    .child(div().opacity(0.6).child(hint.to_string()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.slash_apply(row, window, cx);
+                        }),
+                    )
+            }))
+    }
+
     // ---- Format / View / Help ----
 
     fn zoom_by(&mut self, step: i32, cx: &mut Context<Self>) {
@@ -991,6 +1147,21 @@ impl Render for Notepad {
             .scrollable(true)
             .selectable(true)
         });
+        // Opens under the `/`, painted above everything else. Anchored at the `/`'s
+        // offset, not past it: the text area's layout is a frame behind, so the
+        // just-typed `/` isn't in it yet, but the caret's old spot is.
+        let slash_menu = self.slash_menu(cx).and_then(|(start, matches)| {
+            let bounds = editor.read(cx).range_to_bounds(&(start..start))?;
+            Some(
+                deferred(
+                    anchored()
+                        .position(bounds.bottom_left() + point(px(0.), px(4.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(self.render_slash_menu(&matches, cx)),
+                )
+                .with_priority(1),
+            )
+        });
         let tabs = self.render_tabs(cx);
         let menu_bar = self.render_menu_bar(cx);
         let theme = cx.theme();
@@ -1023,6 +1194,23 @@ impl Render for Notepad {
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_by(0, cx)))
             .child(div().flex_none().child(tabs))
             .child(menu_bar)
+            // Capture phase, so the open `/` menu sees these keys before the text area.
+            .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
+                this.slash_key(SlashKey::Up, window, cx)
+            }))
+            .capture_action(cx.listener(|this, _: &input::MoveDown, window, cx| {
+                this.slash_key(SlashKey::Down, window, cx)
+            }))
+            .capture_action(cx.listener(|this, _: &input::Enter, window, cx| {
+                this.slash_key(SlashKey::Accept, window, cx)
+            }))
+            .capture_action(cx.listener(|this, _: &input::IndentInline, window, cx| {
+                this.slash_key(SlashKey::Accept, window, cx)
+            }))
+            .capture_action(cx.listener(|this, _: &input::Escape, window, cx| {
+                this.slash_key(SlashKey::Dismiss, window, cx)
+            }))
+            .children(slash_menu)
             .child(h_flex().flex_1().min_h_0().items_stretch().map(|this| {
                 let textarea = Textarea::new(&editor)
                     .appearance(false)
@@ -1939,6 +2127,50 @@ mod ui_tests {
             cx.run_until_parked();
             assert_eq!(dirty(cx), expected, "after {keys}");
         }
+    }
+
+    #[test]
+    fn slash_query_only_at_line_start() {
+        use super::{slash_matches, slash_query};
+        assert_eq!(slash_query("/h1"), Some((0, "h1")));
+        assert_eq!(slash_query("  /"), Some((2, "")));
+        assert_eq!(slash_query("and/or"), None);
+        assert_eq!(slash_query("/usr/bin"), None);
+        assert_eq!(slash_matches("").len(), 9);
+        assert_eq!(slash_matches("List").len(), 3);
+    }
+
+    #[gpui_kit::test]
+    fn slash_menu_inserts_markdown(cx: &mut TestAppContext) {
+        let (handle, notepad) = open(cx);
+        let md = std::env::temp_dir().join(format!("notepad-slash-{}.md", std::process::id()));
+        std::fs::write(&md, "").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            notepad.update(cx, |this, cx| this.open_paths(vec![md.clone()], window, cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let text = |cx: &mut TestAppContext| {
+            cx.read(|cx| notepad.read(cx).doc().editor.read(cx).value().to_string())
+        };
+        for keys in ["/", "h", "e", "a", "d", "down", "enter"] {
+            cx.update_window(handle, |_, window, cx| {
+                window.press(keys, cx);
+                window.render_frame(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        // "/head" matches Heading 1–3; Down picks Heading 2.
+        assert_eq!(text(cx), "## ");
+        // Escape closes the menu and Enter is a newline again.
+        for keys in ["enter", "/", "escape", "enter"] {
+            cx.update_window(handle, |_, window, cx| window.press(keys, cx))
+                .unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(text(cx), "## \n/\n");
+        std::fs::remove_file(md).ok();
     }
 
     #[gpui_kit::test]
