@@ -1,0 +1,10 @@
+#!/bin/sh
+# Enable once per clone: git config core.hooksPath .githooks
+# Skip once: git commit --no-verify
+set -e
+
+git diff --cached --name-only | grep -q '^app/' || exit 0
+
+cd app
+cargo fmt --check || { echo "Run: cd app && cargo fmt"; exit 1; }
+cargo clippy --all-targets -- -D warnings

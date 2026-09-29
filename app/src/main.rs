@@ -2144,7 +2144,6 @@ mod ui_tests {
         assert_eq!(slash_matches("List").len(), 3);
     }
 
-
     #[gpui_kit::test]
     fn slash_menu_inserts_markdown(cx: &mut TestAppContext) {
         let (handle, notepad) = open(cx);
