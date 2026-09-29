@@ -88,7 +88,10 @@ impl Block {
             indent: 0,
             spans: vec![Span {
                 text: text.to_string(),
-                style: Style { code: true, ..Style::default() },
+                style: Style {
+                    code: true,
+                    ..Style::default()
+                },
             }],
         }
     }
@@ -108,14 +111,28 @@ fn collect_blocks(node: &Node, indent: u8, out: &mut Vec<Block>) {
     let mut push = |kind, children: &[Node]| {
         let mut spans = Vec::new();
         collect_inline(children, Style::default(), &mut spans);
-        out.push(Block { kind, indent, spans });
+        out.push(Block {
+            kind,
+            indent,
+            spans,
+        });
     };
     match node {
         Node::Heading(h) => push(Kind::Heading(h.depth), &h.children),
         Node::Paragraph(p) => push(Kind::Para, &p.children),
-        Node::Code(c) => out.push(Block { indent, ..Block::code(&c.value) }),
-        Node::ThematicBreak(_) => out.push(Block { kind: Kind::Rule, indent, spans: vec![] }),
-        Node::Blockquote(q) => q.children.iter().for_each(|c| collect_blocks(c, indent + 1, out)),
+        Node::Code(c) => out.push(Block {
+            indent,
+            ..Block::code(&c.value)
+        }),
+        Node::ThematicBreak(_) => out.push(Block {
+            kind: Kind::Rule,
+            indent,
+            spans: vec![],
+        }),
+        Node::Blockquote(q) => q
+            .children
+            .iter()
+            .for_each(|c| collect_blocks(c, indent + 1, out)),
         Node::List(list) => {
             for (i, item) in list.children.iter().enumerate() {
                 let marker = match item {
@@ -129,9 +146,13 @@ fn collect_blocks(node: &Node, indent: u8, out: &mut Vec<Block>) {
                     collect_blocks(child, indent + 1, out);
                 }
                 match out.get_mut(first) {
-                    Some(block) if block.kind != Kind::Code => {
-                        block.spans.insert(0, Span { text: marker, style: Style::default() })
-                    }
+                    Some(block) if block.kind != Kind::Code => block.spans.insert(
+                        0,
+                        Span {
+                            text: marker,
+                            style: Style::default(),
+                        },
+                    ),
                     _ => {}
                 }
             }
@@ -142,11 +163,22 @@ fn collect_blocks(node: &Node, indent: u8, out: &mut Vec<Block>) {
                 let mut spans = Vec::new();
                 for (i, cell) in row.children().into_iter().flatten().enumerate() {
                     if i > 0 {
-                        spans.push(Span { text: " | ".into(), style: Style::default() });
+                        spans.push(Span {
+                            text: " | ".into(),
+                            style: Style::default(),
+                        });
                     }
-                    collect_inline(cell.children().map_or(&[][..], |c| c), Style::default(), &mut spans);
+                    collect_inline(
+                        cell.children().map_or(&[][..], |c| c),
+                        Style::default(),
+                        &mut spans,
+                    );
                 }
-                out.push(Block { kind: Kind::Para, indent, spans });
+                out.push(Block {
+                    kind: Kind::Para,
+                    indent,
+                    spans,
+                });
             }
         }
         Node::Html(_) => {}
@@ -161,15 +193,41 @@ fn collect_blocks(node: &Node, indent: u8, out: &mut Vec<Block>) {
 fn collect_inline(nodes: &[Node], style: Style, out: &mut Vec<Span>) {
     for node in nodes {
         match node {
-            Node::Text(t) => out.push(Span { text: t.value.replace('\n', " "), style }),
+            Node::Text(t) => out.push(Span {
+                text: t.value.replace('\n', " "),
+                style,
+            }),
             Node::InlineCode(c) => out.push(Span {
                 text: c.value.clone(),
-                style: Style { code: true, ..style },
+                style: Style {
+                    code: true,
+                    ..style
+                },
             }),
-            Node::Break(_) => out.push(Span { text: "\n".into(), style }),
-            Node::Strong(s) => collect_inline(&s.children, Style { bold: true, ..style }, out),
-            Node::Emphasis(e) => collect_inline(&e.children, Style { italic: true, ..style }, out),
-            Node::Image(i) => out.push(Span { text: i.alt.clone(), style }),
+            Node::Break(_) => out.push(Span {
+                text: "\n".into(),
+                style,
+            }),
+            Node::Strong(s) => collect_inline(
+                &s.children,
+                Style {
+                    bold: true,
+                    ..style
+                },
+                out,
+            ),
+            Node::Emphasis(e) => collect_inline(
+                &e.children,
+                Style {
+                    italic: true,
+                    ..style
+                },
+                out,
+            ),
+            Node::Image(i) => out.push(Span {
+                text: i.alt.clone(),
+                style,
+            }),
             Node::Html(_) => {}
             other => collect_inline(other.children().map_or(&[][..], |c| c), style, out),
         }
@@ -219,7 +277,8 @@ fn system_face(family: &str, bold: bool, italic: bool) -> Option<Source> {
 
     let descs = core_text::font_collection::create_for_family(family)?.get_descriptors()?;
     let base = core_text::font::new_from_descriptor(&*descs.get(0)?, 12.0);
-    let want = (if bold { kCTFontBoldTrait } else { 0 }) | (if italic { kCTFontItalicTrait } else { 0 });
+    let want =
+        (if bold { kCTFontBoldTrait } else { 0 }) | (if italic { kCTFontItalicTrait } else { 0 });
     let font = base.clone_with_symbolic_traits(want, kCTFontBoldTrait | kCTFontItalicTrait)?;
     let traits = font.symbolic_traits();
     if traits.is_bold() != bold || traits.is_italic() != italic || font.family_name() != family {
@@ -246,7 +305,9 @@ fn system_face(family: &str, bold: bool, italic: bool) -> Option<Source> {
 /// that exists, and to Lilex when the family isn't a system font (Lilex is app-bundled).
 fn family_faces(family: &str) -> [Source; 4] {
     let lilex = |bold| Source::Lilex { bold };
-    let Some(regular) = (family != "Lilex").then(|| system_face(family, false, false)).flatten()
+    let Some(regular) = (family != "Lilex")
+        .then(|| system_face(family, false, false))
+        .flatten()
     else {
         return [lilex(false), lilex(true), lilex(false), lilex(true)];
     };
@@ -303,9 +364,9 @@ impl Fonts {
         let upm = parsed.font_metrics.units_per_em.max(1) as f32;
         text.chars()
             .map(|c| {
-                parsed
-                    .lookup_glyph_index(c as u32)
-                    .map_or(size * 0.6, |g| parsed.get_horizontal_advance(g) as f32 / upm * size)
+                parsed.lookup_glyph_index(c as u32).map_or(size * 0.6, |g| {
+                    parsed.get_horizontal_advance(g) as f32 / upm * size
+                })
             })
             .sum()
     }
@@ -319,7 +380,10 @@ fn wrap_block(block: &Block, size: f32, max_w: f32, m: &Fonts) -> Vec<PdfLine> {
     let mut width = 0.0;
     let bold = matches!(block.kind, Kind::Heading(_));
     for span in &block.spans {
-        let font = m.face(Style { bold: bold || span.style.bold, ..span.style });
+        let font = m.face(Style {
+            bold: bold || span.style.bold,
+            ..span.style
+        });
         let tokens: Vec<&str> = if block.kind == Kind::Code {
             span.text.split_inclusive('\n').collect()
         } else {
@@ -386,7 +450,12 @@ fn write_pdf(
     let margin = Mm(MARGIN_MM).into_pt().0;
     let page_w = Mm(PAGE_W_MM).into_pt().0;
     let page_h = Mm(PAGE_H_MM).into_pt().0;
-    let black = Color::Rgb(Rgb { r: 0.0, g: 0.0, b: 0.0, icc_profile: None });
+    let black = Color::Rgb(Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        icc_profile: None,
+    });
 
     let mut pages: Vec<Vec<Op>> = vec![vec![]];
     let mut y = page_h - margin;
@@ -395,7 +464,11 @@ fn write_pdf(
         let size = block_size(block.kind, body);
         let line_h = size * LINE_HEIGHT;
         let x = margin + block.indent as f32 * INDENT_PT;
-        let gap = if first { 0.0 } else { gap_before(block.kind, body) };
+        let gap = if first {
+            0.0
+        } else {
+            gap_before(block.kind, body)
+        };
         first = false;
         y -= gap;
         if block.kind == Kind::Rule {
@@ -403,7 +476,13 @@ fn write_pdf(
             pages.last_mut().unwrap().push(Op::DrawLine {
                 line: Line {
                     points: [x, page_w - margin]
-                        .map(|px| LinePoint { p: Point { x: Pt(px), y: Pt(y) }, bezier: false })
+                        .map(|px| LinePoint {
+                            p: Point {
+                                x: Pt(px),
+                                y: Pt(y),
+                            },
+                            bezier: false,
+                        })
                         .to_vec(),
                     is_closed: false,
                 },
@@ -418,12 +497,22 @@ fn write_pdf(
             y -= line_h;
             let ops = pages.last_mut().unwrap();
             ops.push(Op::StartTextSection);
-            ops.push(Op::SetTextCursor { pos: Point { x: Pt(x), y: Pt(y + line_h - size) } });
+            ops.push(Op::SetTextCursor {
+                pos: Point {
+                    x: Pt(x),
+                    y: Pt(y + line_h - size),
+                },
+            });
             ops.push(Op::SetFillColor { col: black.clone() });
             // Each ShowText advances the cursor, so styled runs sit side by side.
             for (font, text) in line {
-                ops.push(Op::SetFont { font: PdfFontHandle::External(m.faces[font].0.clone()), size: Pt(size) });
-                ops.push(Op::ShowText { items: vec![TextItem::Text(text)] });
+                ops.push(Op::SetFont {
+                    font: PdfFontHandle::External(m.faces[font].0.clone()),
+                    size: Pt(size),
+                });
+                ops.push(Op::ShowText {
+                    items: vec![TextItem::Text(text)],
+                });
             }
             ops.push(Op::EndTextSection);
         }
@@ -467,20 +556,37 @@ fn write_docx(
         // One paragraph per code line keeps Word's spacing from double-spacing code.
         if block.kind == Kind::Code {
             let text = &block.spans[0].text;
-            for (i, line) in text.strip_suffix('\n').unwrap_or(text).split('\n').enumerate() {
+            for (i, line) in text
+                .strip_suffix('\n')
+                .unwrap_or(text)
+                .split('\n')
+                .enumerate()
+            {
                 let p = Paragraph::new()
                     .line_spacing(spacing(if i == 0 { gap } else { 0.0 }))
-                    .add_run(Run::new().add_text(line).fonts(font(code_family)).size(half_pts(body)))
+                    .add_run(
+                        Run::new()
+                            .add_text(line)
+                            .fonts(font(code_family))
+                            .size(half_pts(body)),
+                    )
                     .indent(Some(block.indent as i32 * 360), None, None, None);
                 docx = docx.add_paragraph(p);
             }
             continue;
         }
-        let mut p = Paragraph::new()
-            .line_spacing(spacing(gap))
-            .indent(Some(block.indent as i32 * 360), None, None, None);
+        let mut p = Paragraph::new().line_spacing(spacing(gap)).indent(
+            Some(block.indent as i32 * 360),
+            None,
+            None,
+            None,
+        );
         if block.kind == Kind::Rule {
-            p = p.add_run(Run::new().add_text("\u{2014}".repeat(20)).fonts(font(family)));
+            p = p.add_run(
+                Run::new()
+                    .add_text("\u{2014}".repeat(20))
+                    .fonts(font(family)),
+            );
         }
         let heading = matches!(block.kind, Kind::Heading(_));
         for span in &block.spans {
@@ -514,16 +620,32 @@ mod tests {
 
     #[test]
     fn markdown_becomes_styled_blocks() {
-        let blocks = markdown_blocks("# Title\n\nSome **bold** and `code`.\n\n- one\n- two\n\n---\n");
+        let blocks =
+            markdown_blocks("# Title\n\nSome **bold** and `code`.\n\n- one\n- two\n\n---\n");
         assert_eq!(blocks[0].kind, Kind::Heading(1));
         assert_eq!(blocks[0].spans[0].text, "Title");
-        assert!(blocks[1].spans.iter().any(|s| s.text == "bold" && s.style.bold));
-        assert!(blocks[1].spans.iter().any(|s| s.text == "code" && s.style.code));
+        assert!(
+            blocks[1]
+                .spans
+                .iter()
+                .any(|s| s.text == "bold" && s.style.bold)
+        );
+        assert!(
+            blocks[1]
+                .spans
+                .iter()
+                .any(|s| s.text == "code" && s.style.code)
+        );
         assert_eq!(blocks[2].spans[0].text, "\u{2022} ");
         assert_eq!(blocks[2].indent, 1);
         assert_eq!(blocks[4].kind, Kind::Rule);
         // No raw markdown syntax leaks through.
-        assert!(!blocks.iter().flat_map(|b| &b.spans).any(|s| s.text.contains(['#', '*', '`'])));
+        assert!(
+            !blocks
+                .iter()
+                .flat_map(|b| &b.spans)
+                .any(|s| s.text.contains(['#', '*', '`']))
+        );
     }
 
     #[test]
@@ -533,7 +655,10 @@ mod tests {
         let lines = wrap_block(&block, 11.0, 400.0, &m);
         assert!(lines.len() > 5);
         for line in &lines {
-            let w: f32 = line.iter().map(|(f, t)| m.width(*f, 11.0, t.trim_end())).sum();
+            let w: f32 = line
+                .iter()
+                .map(|(f, t)| m.width(*f, 11.0, t.trim_end()))
+                .sum();
             assert!(w <= 400.0, "line too wide: {w}");
         }
     }
@@ -544,15 +669,25 @@ mod tests {
         let [r, b, ..] = family_faces("Menlo");
         assert!(matches!(r, Source::File(..)));
         assert_ne!(r, b);
-        assert_eq!(family_faces("No Such Font")[0], Source::Lilex { bold: false });
+        assert_eq!(
+            family_faces("No Such Font")[0],
+            Source::Lilex { bold: false }
+        );
     }
 
     #[test]
     fn exports_pdf_and_docx() {
         let dir = std::env::temp_dir();
-        let text = "# Hello\n\nBetter *Notepad*!\n".to_string() + &"x".repeat(500) + "\n\nlast line";
-        for (markdown, family) in [(false, "Menlo"), (true, "Helvetica Neue"), (true, "Lilex"), (false, "No Such Font")] {
-            let write = |format: ExportFormat, path| format.write(&text, markdown, family, 12.0, path);
+        let text =
+            "# Hello\n\nBetter *Notepad*!\n".to_string() + &"x".repeat(500) + "\n\nlast line";
+        for (markdown, family) in [
+            (false, "Menlo"),
+            (true, "Helvetica Neue"),
+            (true, "Lilex"),
+            (false, "No Such Font"),
+        ] {
+            let write =
+                |format: ExportFormat, path| format.write(&text, markdown, family, 12.0, path);
             let pdf_path = dir.join("betternotepad_export_test.pdf");
             write(ExportFormat::Pdf, &pdf_path).unwrap();
             assert!(std::fs::read(&pdf_path).unwrap().starts_with(b"%PDF"));

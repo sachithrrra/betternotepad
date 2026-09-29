@@ -1132,17 +1132,21 @@ impl Render for Notepad {
             .text_size(px(font_px))
             // Inline code defaults to the blue `accent` (it tints links in tables), and
             // header text to `muted_foreground`, which reads as disabled.
+            // Headings scale from their own base (fixed 14px), not `text_size`, so feed it the font too.
             .style(
-                TextViewStyle::default()
-                    .inline_code(HighlightStyle {
-                        background_color: Some(theme.muted),
-                        ..Default::default()
-                    })
-                    .table_head(
-                        StyleRefinement::default()
-                            .text_color(theme.foreground)
-                            .font_weight(FontWeight::SEMIBOLD),
-                    ),
+                TextViewStyle {
+                    heading_base_font_size: px(font_px),
+                    ..Default::default()
+                }
+                .inline_code(HighlightStyle {
+                    background_color: Some(theme.muted),
+                    ..Default::default()
+                })
+                .table_head(
+                    StyleRefinement::default()
+                        .text_color(theme.foreground)
+                        .font_weight(FontWeight::SEMIBOLD),
+                ),
             )
             .scrollable(true)
             .selectable(true)
@@ -2139,6 +2143,7 @@ mod ui_tests {
         assert_eq!(slash_matches("").len(), 9);
         assert_eq!(slash_matches("List").len(), 3);
     }
+
 
     #[gpui_kit::test]
     fn slash_menu_inserts_markdown(cx: &mut TestAppContext) {
