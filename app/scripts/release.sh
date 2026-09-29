@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build, sign, notarize, staple, repackage as dmg+zip, upload the GitHub
+# Build, sign, notarize, staple, repackage as dmg, upload the GitHub
 # Release, and add the appcast entry. Does NOT bump the version (edit
 # app/Cargo.toml first) or git commit/push — that stays manual.
 set -eu
@@ -37,18 +37,21 @@ spctl -a -vvv --type exec "$APP"
 rm -f "$DMG"
 uvx dmgbuild -s scripts/dmg-settings.py -D app="$APP" "$APP_NAME" "$DMG"
 
-# 8. Zip the stapled app for Sparkle and sign it
-ZIP="BetterNotepad-$VERSION.zip"
-ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-SIGN_UPDATE_OUT="$(vendor/bin/sign_update "$ZIP")"
+# 8. Sign the dmg for Sparkle (it installs updates straight from the dmg)
+SIGN_UPDATE_OUT="$(vendor/bin/sign_update "$DMG")"
 
 # 9. CFBundleVersion (goes in the appcast's <sparkle:version>)
 CFBUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist")"
 MIN_SYS="$(sed -n 's/^minimum_system_version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
-# 10. Upload dmg (human download) + zip (Sparkle enclosure) to a GitHub Release
-gh release create "v$VERSION" "$DMG" "$ZIP" \
-  --title "v$VERSION" --notes "Release v$VERSION." --repo sachithrrra/betternotepad
+# 10. Upload the dmg (human download + Sparkle enclosure) to a GitHub Release
+NOTES="release-notes/$VERSION.md"
+[ -f "$NOTES" ] || NOTES=/dev/null
+gh release create "v$VERSION" "$DMG" \
+  --title "v$VERSION" --notes-file "$NOTES" --repo sachithrrra/betternotepad
+# GitHub renames the asset (spaces -> dots), so ask it for the real URL
+DMG_URL="$(gh release view "v$VERSION" --repo sachithrrra/betternotepad \
+  --json assets -q '.assets[] | select(.name | endswith(".dmg")) | .url')"
 
 # 11. Add the appcast entry (newest first) — does not commit or push
 APPCAST="$REPO_ROOT/site/public/appcast.xml"
@@ -61,7 +64,7 @@ cat > "$TMP_ITEM" <<EOF
       <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>$MIN_SYS</sparkle:minimumSystemVersion>
       <enclosure
-        url="https://github.com/sachithrrra/betternotepad/releases/download/v$VERSION/$ZIP"
+        url="$DMG_URL"
         $SIGN_UPDATE_OUT
         type="application/octet-stream" />
     </item>
