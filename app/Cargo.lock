@@ -689,6 +689,8 @@ dependencies = [
  "markdown",
  "objc",
  "printpdf",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
+use serde::{Deserialize, Serialize};
 
 actions!(
     notepad,
@@ -70,6 +71,14 @@ struct OpenRecent(PathBuf);
 struct Export(ExportFormat);
 
 const MAX_RECENT: usize = 10;
+
+/// What File > Open asks the file picker for.
+const OPEN_FILES: PathPromptOptions = PathPromptOptions {
+    files: true,
+    directories: false,
+    multiple: true,
+    prompt: None,
+};
 
 /// The Notion-style `/` menu in markdown tabs: label, search keys, and the markdown
 /// it inserts (`|` marks where the cursor lands, else the end).
@@ -185,6 +194,110 @@ fn load_recent() -> Vec<PathBuf> {
         .filter(|p| p.exists())
         .take(MAX_RECENT)
         .collect()
+}
+
+fn session_file() -> Option<PathBuf> {
+    Some(support_dir()?.join("session.json"))
+}
+
+/// One tab as the session saves it. `text` is its unsaved text; none when the
+/// tab matches its file (or is a blank Untitled).
+#[derive(Serialize, Deserialize)]
+struct TabState {
+    path: Option<PathBuf>,
+    text: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WindowState {
+    tabs: Vec<TabState>,
+    active: usize,
+}
+
+/// Every window's tabs, unsaved text included, saved as they change so the
+/// next launch brings them back.
+#[derive(Default)]
+struct Session {
+    windows: Vec<WeakEntity<Notepad>>,
+    /// The JSON last written, so an unchanged session isn't rewritten.
+    saved: String,
+    /// A save is already queued.
+    scheduled: bool,
+    /// Quit is waiting on the windows' unsaved-changes prompts.
+    quitting: bool,
+}
+impl Global for Session {}
+
+fn load_session() -> Vec<WindowState> {
+    session_file()
+        .and_then(|file| std::fs::read(file).ok())
+        .and_then(|json| serde_json::from_slice(&json).ok())
+        .unwrap_or_default()
+}
+
+/// False if the session couldn't be saved; callers then fall back to the
+/// unsaved-changes prompts rather than lose text.
+// ponytail: rewrites every unsaved tab's text on each save (at most one a second);
+// keep a backup file per tab if huge unsaved documents make that lag.
+fn write_session(windows: &[WindowState], cx: &mut App) -> bool {
+    let Some(file) = session_file() else {
+        return false;
+    };
+    let Ok(json) = serde_json::to_string(windows) else {
+        return false;
+    };
+    if json == cx.default_global::<Session>().saved {
+        return true;
+    }
+    // Written beside the file, then renamed over it: a crash mid-write can't
+    // leave a torn session.
+    let tmp = file.with_extension("tmp");
+    let written = std::fs::write(&tmp, &json)
+        .and_then(|_| std::fs::rename(&tmp, &file))
+        .is_ok();
+    if written {
+        cx.global_mut::<Session>().saved = json;
+    }
+    written
+}
+
+fn save_session(cx: &mut App) -> bool {
+    let notepads: Vec<_> = cx
+        .default_global::<Session>()
+        .windows
+        .iter()
+        .filter_map(WeakEntity::upgrade)
+        .collect();
+    let windows: Vec<_> = notepads
+        .iter()
+        .map(|notepad| notepad.read(cx).state(cx))
+        .collect();
+    // With no window left there's nothing to add: the last one wrote (or
+    // cleared) the session on its way out.
+    windows.is_empty() || write_session(&windows, cx)
+}
+
+/// Queues a save a moment from now, so a burst of edits is one write.
+fn schedule_save(cx: &mut App) {
+    if std::mem::replace(&mut cx.default_global::<Session>().scheduled, true) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_secs(1)).await;
+        cx.update(|cx| {
+            cx.default_global::<Session>().scheduled = false;
+            save_session(cx);
+        });
+    })
+    .detach();
+}
+
+/// How many editor windows are open.
+fn editor_windows(cx: &App) -> usize {
+    cx.try_global::<Session>().map_or(0, |session| {
+        let open = session.windows.iter().filter(|w| w.upgrade().is_some());
+        open.count()
+    })
 }
 
 fn set_recent(cx: &mut App, update: impl FnOnce(&mut Vec<PathBuf>)) {
@@ -321,15 +434,11 @@ impl Notepad {
         ];
 
         let this = cx.entity().downgrade();
+        // Never closes on the spot: `request_close_window` saves the session or
+        // prompts first, then removes the window itself.
         window.on_window_should_close(cx, move |window, cx| {
-            this.update(cx, |this, cx| {
-                let dirty = this.docs.iter().any(|doc| doc.dirty);
-                if dirty {
-                    this.request_close_window(window, cx);
-                }
-                !dirty
-            })
-            .unwrap_or(true)
+            this.update(cx, |this, cx| this.request_close_window(window, cx))
+                .is_err()
         });
 
         let mut notepad = Self {
@@ -345,6 +454,43 @@ impl Notepad {
         notepad.add_tab(window, cx);
         notepad.open_paths(paths, window, cx);
         notepad
+    }
+
+    fn state(&self, cx: &App) -> WindowState {
+        let tabs = self.docs.iter().map(|doc| TabState {
+            path: doc.path.clone(),
+            text: doc.dirty.then(|| doc.editor.read(cx).value().to_string()),
+        });
+        WindowState {
+            tabs: tabs.collect(),
+            active: self.active,
+        }
+    }
+
+    /// Rebuilds a saved window over the blank tab `new` starts with.
+    fn restore(&mut self, state: WindowState, window: &mut Window, cx: &mut Context<Self>) {
+        let mut first = true;
+        for tab in state.tabs {
+            // A clean tab whose file is gone is dropped; one with unsaved text
+            // comes back as a new file at that path.
+            if tab.text.is_none() && tab.path.as_ref().is_some_and(|p| !p.exists()) {
+                continue;
+            }
+            let ix = if std::mem::take(&mut first) {
+                0
+            } else {
+                self.add_tab(window, cx)
+            };
+            if let Some(path) = tab.path {
+                self.load(ix, path, window, cx);
+            }
+            if let Some(text) = tab.text {
+                let editor = self.docs[ix].editor.clone();
+                editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+                self.refresh_dirty(editor.entity_id(), window, cx);
+            }
+        }
+        self.activate(state.active, window, cx);
     }
 
     fn doc(&self) -> &Doc {
@@ -440,11 +586,21 @@ impl Notepad {
             } else {
                 self.add_tab(window, cx)
             };
-            self.load(ix, path, window, cx);
+            // Not in `load`: restoring the session mustn't reshuffle Open Recent.
+            if self.load(ix, path.clone(), window, cx) {
+                remember_recent(&path, cx);
+            }
         }
     }
 
-    fn load(&mut self, ix: usize, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// False if the file couldn't be read.
+    fn load(
+        &mut self,
+        ix: usize,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let (text, eol, encoding) = match std::fs::read(&path) {
             Ok(bytes) => decode(&bytes),
             // A path from the command line that doesn't exist yet becomes a new file there.
@@ -458,17 +614,17 @@ impl Notepad {
                     window,
                     cx,
                 );
-                return;
+                return false;
             }
         };
         let doc = &mut self.docs[ix];
         doc.editor
             .update(cx, |editor, cx| editor.set_value(text, window, cx));
-        remember_recent(&path, cx);
         doc.saved = doc.editor.read(cx).text().clone();
         (doc.path, doc.eol, doc.encoding, doc.dirty) = (Some(path), eol, encoding, false);
         doc.preview = doc.is_markdown();
         self.activate(ix, window, cx);
+        true
     }
 
     fn write(
@@ -653,7 +809,11 @@ impl Notepad {
             this.update_in(cx, |this, window, cx| {
                 let Some(ix) = this.doc_ix(id) else { return };
                 if this.docs.len() == 1 {
-                    // Closing the last tab closes the window.
+                    // Closing the last tab closes the window; a tab closed by
+                    // hand doesn't come back with the next window.
+                    if editor_windows(cx) <= 1 {
+                        write_session(&[], cx);
+                    }
                     return window.remove_window();
                 }
                 this.docs.remove(ix);
@@ -669,10 +829,17 @@ impl Notepad {
     }
 
     fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The last window takes its tabs, unsaved text included, into the session
+        // instead of prompting. Any other window's tabs are gone for good.
+        if editor_windows(cx) <= 1 && write_session(&[self.state(cx)], cx) {
+            return window.remove_window();
+        }
         let ids: Vec<EntityId> = self.docs.iter().map(Doc::id).collect();
         cx.spawn_in(window, async move |this, cx| {
             for id in ids {
                 if !Self::confirm_discard(this.clone(), id, cx).await? {
+                    // Cancelling a prompt also calls off the Quit that raised it.
+                    cx.update(|_, cx| cx.default_global::<Session>().quitting = false)?;
                     return Ok(());
                 }
             }
@@ -688,12 +855,7 @@ impl Notepad {
     }
 
     fn open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: None,
-        });
+        let picked = cx.prompt_for_paths(OPEN_FILES);
         cx.spawn_in(window, async move |this, cx| {
             if let Some(paths) = picked.await?? {
                 this.update_in(cx, |this, window, cx| this.open_paths(paths, window, cx))?;
@@ -1568,6 +1730,26 @@ fn init(cx: &mut App) {
     cx.set_global(Updater(updater::start()));
 
     cx.on_action(|_: &NewWindow, cx| open_window(Vec::new(), cx));
+    // File commands no editor window picked up (none is open, or Settings has
+    // focus) open a window of their own.
+    cx.on_action(|_: &NewTab, cx| open_window(Vec::new(), cx));
+    cx.on_action(|_: &Open, cx| {
+        let picked = cx.prompt_for_paths(OPEN_FILES);
+        cx.spawn(async move |cx| {
+            if let Ok(Ok(Some(paths))) = picked.await {
+                cx.update(|cx| open_window(paths, cx));
+            }
+        })
+        .detach();
+    });
+    cx.on_action(|action: &OpenRecent, cx| {
+        let path = action.0.clone();
+        if path.exists() {
+            open_window(vec![path], cx);
+        } else {
+            set_recent(cx, |recent| recent.retain(|p| *p != path));
+        }
+    });
     cx.on_action(|_: &OpenSettings, cx| open_settings(cx));
     cx.on_action(|_: &About, cx| open_about(cx));
     cx.on_action(|_: &CheckForUpdates, cx| {
@@ -1582,22 +1764,60 @@ fn init(cx: &mut App) {
         cx.update_global::<Settings, _>(|s, _| s.status_bar = !s.status_bar);
         set_menus(cx);
     });
-    // Each window runs its own unsaved-changes prompts; the app exits with the last one.
+    // With the session saved the app just quits: the next launch brings back every
+    // tab, unsaved text included. If it can't be saved, each window runs its own
+    // unsaved-changes prompts instead and the app exits with the last of them.
     // Deferred: Quit usually arrives while its window is mid-update, and
     // updating that window from inside itself fails.
     cx.on_action(|_: &Quit, cx| {
         cx.defer(|cx| {
+            let saved = save_session(cx);
+            cx.default_global::<Session>().quitting = !saved;
             for window in cx.windows() {
                 let _ = window.update(cx, |_, window, cx| {
-                    window.dispatch_action(Box::new(CloseWindow), cx)
+                    if saved {
+                        window.remove_window()
+                    } else {
+                        window.dispatch_action(Box::new(CloseWindow), cx)
+                    }
                 });
+            }
+            if saved {
+                cx.quit();
             }
         })
     });
+    // A quit that skips the action above (Dock, logout) still keeps the session.
+    cx.on_app_quit(|cx| {
+        save_session(cx);
+        async {}
+    })
+    .detach();
 }
 
+/// Opens a window on `paths`. When no editor window is open (at launch, or after
+/// the last one closed) the saved session's windows come back first, and with
+/// nothing else to open they are all it opens. Otherwise the new window's first
+/// save would overwrite the session, unsaved text and all.
 fn open_window(paths: Vec<PathBuf>, cx: &mut App) {
-    let bounds = Bounds::centered(None, size(px(900.), px(640.)), cx);
+    if editor_windows(cx) == 0 {
+        let session = load_session();
+        let restored = !session.is_empty();
+        for state in session {
+            build_window(Vec::new(), Some(state), cx);
+        }
+        if restored && paths.is_empty() {
+            return;
+        }
+    }
+    build_window(paths, None, cx);
+}
+
+fn build_window(paths: Vec<PathBuf>, restore: Option<WindowState>, cx: &mut App) {
+    let mut bounds = Bounds::centered(None, size(px(900.), px(640.)), cx);
+    // Step each window down-right of the last, so several don't hide each other.
+    let step = px((cx.windows().len() % 8) as f32 * 24.);
+    bounds.origin += point(step, step);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
@@ -1608,7 +1828,17 @@ fn open_window(paths: Vec<PathBuf>, cx: &mut App) {
     };
     cx.open_window(options, |window, cx| {
         apply_appearance(cx);
-        let view = cx.new(|cx| Notepad::new(paths, window, cx));
+        let view = cx.new(|cx| {
+            let mut notepad = Notepad::new(paths, window, cx);
+            if let Some(state) = restore {
+                notepad.restore(state, window, cx);
+            }
+            notepad
+        });
+        cx.default_global::<Session>()
+            .windows
+            .push(view.downgrade());
+        cx.observe(&view, |_, cx| schedule_save(cx)).detach();
         cx.new(|cx| Root::new(view, window, cx))
     })
     .expect("failed to open window");
@@ -1921,6 +2151,13 @@ fn main() {
     }
     let (open_tx, open_rx) = async_channel::unbounded::<Vec<PathBuf>>();
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // Like other Mac document apps, closing the last window leaves the app running;
+    // clicking its Dock icon then brings a window back.
+    app.on_reopen(|cx| {
+        if editor_windows(cx) == 0 {
+            open_window(Vec::new(), cx);
+        }
+    });
     // Finder ("Open With", double-click, drag-onto-dock-icon) delivers files as
     // `file://` URLs here, not as argv — this fires both at launch and while running.
     app.on_open_urls(move |urls| {
@@ -1932,7 +2169,7 @@ fn main() {
     app.run(move |cx| {
         init(cx);
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
+            if cx.windows().is_empty() && cx.default_global::<Session>().quitting {
                 cx.quit();
             }
         })
@@ -1944,7 +2181,7 @@ fn main() {
             open_window(paths, cx);
         } else {
             // A Finder-initiated launch delivers its file via `on_open_urls` shortly
-            // after this closure runs; wait a beat before defaulting to a blank window.
+            // after this closure runs; wait a beat before defaulting to the last session.
             let opened = opened.clone();
             cx.spawn(async move |cx| {
                 cx.background_executor()
@@ -2175,6 +2412,64 @@ mod ui_tests {
         }
         assert_eq!(text(cx), "## \n/\n");
         std::fs::remove_file(md).ok();
+    }
+
+    #[gpui_kit::test]
+    fn file_commands_open_a_window_when_none_is_open(cx: &mut TestAppContext) {
+        cx.update(init);
+        cx.update(|cx| cx.dispatch_action(&NewTab));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            assert_eq!(super::editor_windows(cx), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn session_round_trips_tabs_and_unsaved_text(cx: &mut TestAppContext) {
+        use super::{TabState, WindowState};
+        let (handle, notepad) = open(cx);
+        let file = std::env::temp_dir().join(format!("notepad-session-{}.txt", std::process::id()));
+        std::fs::write(&file, "on disk").unwrap();
+        let tab = |path: Option<&std::path::Path>, text: Option<&str>| TabState {
+            path: path.map(Into::into),
+            text: text.map(Into::into),
+        };
+        let saved = WindowState {
+            tabs: vec![
+                tab(None, Some("draft")),
+                tab(Some(&file), None),
+                tab(Some(&file.with_extension("gone")), None),
+                tab(Some(&file.with_extension("new")), Some("edited")),
+            ],
+            active: 1,
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            notepad.update(cx, |this, cx| {
+                this.restore(serde_json::from_str(&json).unwrap(), window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let this = notepad.read(cx);
+            let text = |ix: usize| this.docs[ix].editor.read(cx).value().to_string();
+            // The clean tab whose file is gone was dropped.
+            assert_eq!(this.docs.len(), 3);
+            assert_eq!((text(0), this.docs[0].dirty), ("draft".into(), true));
+            assert_eq!((text(1), this.docs[1].dirty), ("on disk".into(), false));
+            assert_eq!((text(2), this.docs[2].dirty), ("edited".into(), true));
+            assert_eq!(this.active, 1);
+            // Restoring leaves Open Recent alone.
+            assert!(cx.global::<super::Settings>().recent.is_empty());
+            // What it saves next is what it was given, minus the dropped tab.
+            let state = this.state(cx);
+            assert_eq!(state.active, 1);
+            let texts: Vec<_> = state.tabs.iter().map(|t| t.text.as_deref()).collect();
+            assert_eq!(texts, [Some("draft"), None, Some("edited")]);
+        });
+        std::fs::remove_file(file).ok();
     }
 
     #[gpui_kit::test]
