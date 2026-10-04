@@ -12,6 +12,17 @@
     <description>Updates to Better Notepad.</description>
     <language>en</language>
     <item>
+      <title>Version 1.3.1</title>
+      <pubDate>Sun, 04 Oct 2026 05:42:49 +0000</pubDate>
+      <sparkle:version>20261004.053959</sparkle:version>
+      <sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/sachithrrra/betternotepad/releases/download/v1.3.1/Better.Notepad.dmg"
+        sparkle:edSignature="kmfEp5BVYlwGeFtcyxogF2FhoovRQhfBckGf6c+VR77PaDacV4TIvh4FeUR0SKWHniIdo4Myn7sx3I1I3in9Bg==" length="10618831"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 1.3.0</title>
       <pubDate>Sun, 04 Oct 2026 05:27:01 +0000</pubDate>
       <sparkle:version>20261004.052431</sparkle:version>
