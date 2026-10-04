@@ -401,10 +401,10 @@ fn apply_appearance(cx: &mut App) {
         ),
     };
     // The default, or a theme file that's gone (or not loaded yet), is our palette.
-    let registry = ThemeRegistry::global(cx);
-    let pick = |name: &SharedString, mode| match registry.themes().get(name) {
-        Some(theme) if !theme.is_default => theme.clone(),
-        _ => default_theme(mode, registry),
+    let pick = |name: &SharedString, mode| {
+        find_theme(name, cx)
+            .filter(|t| t.mode == mode)
+            .unwrap_or_else(|| default_theme(mode, ThemeRegistry::global(cx)))
     };
     let light = pick(&settings.light_theme, ThemeMode::Light);
     let dark_theme = pick(&settings.dark_theme, ThemeMode::Dark);
@@ -1714,19 +1714,13 @@ fn bind_keys(cx: &mut App) {
 /// Bundled themes plus the themes folder's JSON files, which reload live as
 /// they're edited; a file theme named like a bundled one replaces it.
 fn install_themes(cx: &mut App) {
-    // A reload keeps only the kit's defaults and the folder's files, so put the
-    // bundled themes back, then re-apply: the chosen theme may have changed.
-    cx.observe_global::<ThemeRegistry>(|cx| {
-        let themes = ThemeRegistry::global(cx).themes();
-        let builtin: ThemeSet = serde_json::from_str(BUILTIN_THEMES).expect("bundled themes");
-        if builtin.themes.iter().all(|t| themes.contains_key(&t.name)) {
-            apply_appearance(cx);
-        } else {
-            add_builtin_themes(cx);
-        }
-    })
-    .detach();
-    add_builtin_themes(cx);
+    let builtin: ThemeSet = serde_json::from_str(BUILTIN_THEMES).expect("bundled themes");
+    cx.set_global(BuiltinThemes(
+        builtin.themes.into_iter().map(Rc::new).collect(),
+    ));
+    // Theme files load, change and go: re-apply in case the chosen one did.
+    cx.observe_global::<ThemeRegistry>(apply_appearance)
+        .detach();
     if let Some(dir) = themes_dir() {
         let _ = ThemeRegistry::watch_dir(dir, cx, |_| {});
     }
@@ -1833,10 +1827,22 @@ fn strip_nulls(value: &mut serde_json::Value) {
     }
 }
 
-fn add_builtin_themes(cx: &mut App) {
-    ThemeRegistry::global_mut(cx)
-        .load_themes_from_str(BUILTIN_THEMES)
-        .expect("bundled themes");
+/// The bundled themes, kept out of the kit's registry: each reload of the themes
+/// folder clears everything there but the kit's defaults and the folder's files.
+struct BuiltinThemes(Vec<Rc<ThemeConfig>>);
+impl Global for BuiltinThemes {}
+
+/// A theme by name; a file's theme replaces a bundled one of the same name.
+fn find_theme(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
+    let file = ThemeRegistry::global(cx).themes().get(name);
+    file.filter(|t| !t.is_default)
+        .or_else(|| {
+            cx.global::<BuiltinThemes>()
+                .0
+                .iter()
+                .find(|t| t.name == name)
+        })
+        .cloned()
 }
 
 /// Lilex isn't a system font, so it ships inside the binary (OFL, see fonts/OFL.txt).
@@ -2099,15 +2105,23 @@ struct SettingsView {
 
 /// Names of the loaded themes for `mode`, and where the chosen one is among them.
 fn theme_names(mode: ThemeMode, cx: &App) -> (SearchableVec<String>, Option<IndexPath>) {
-    let names: Vec<String> = ThemeRegistry::global(cx)
-        .sorted_themes()
-        .into_iter()
-        .filter(|t| t.mode == mode)
-        .map(|t| t.name.to_string())
-        .collect();
+    let names = themes_for(mode, cx);
     let chosen = cx.global::<Settings>().theme(mode);
     let ix = names.iter().position(|n| n == chosen);
     (SearchableVec::new(names), ix.map(IndexPath::new))
+}
+
+/// Theme names for `mode`: the default first, then the bundled and file themes by name.
+fn themes_for(mode: ThemeMode, cx: &App) -> Vec<String> {
+    let files = ThemeRegistry::global(cx).themes().values();
+    let mut themes: Vec<_> = files
+        .chain(&cx.global::<BuiltinThemes>().0)
+        .filter(|t| t.mode == mode)
+        .collect();
+    themes.sort_by_key(|t| (!t.is_default, t.name.to_lowercase()));
+    let mut names: Vec<String> = themes.iter().map(|t| t.name.to_string()).collect();
+    names.dedup();
+    names
 }
 
 fn theme_select(
@@ -2570,13 +2584,60 @@ mod ui_tests {
     }
 
     #[gpui_kit::test]
+    fn custom_themes_keep_the_bundled_ones(cx: &mut TestAppContext) {
+        open(cx);
+        let dir = std::env::temp_dir().join(format!("np-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let example = cx.update(|cx| super::example_theme(cx));
+        std::fs::write(dir.join("my-theme.json"), example).unwrap();
+        cx.update(|cx| {
+            cx.global_mut::<super::Settings>().dark_theme = "Dracula".into();
+        });
+        // The Themes window is open while the folder (re)loads.
+        let themes = cx.open_window(size(px(560.), px(360.)), |window, cx| {
+            let view = cx.new(|cx| super::ThemesView::new(window, cx));
+            Root::new(view, window, cx)
+        });
+        cx.update(|cx| super::ThemeRegistry::watch_dir(dir.clone(), cx, |_| {}).unwrap());
+        cx.run_until_parked();
+        // Reloads again, as an edit to the folder does.
+        cx.update(|cx| super::ThemeRegistry::watch_dir(dir.clone(), cx, |_| {}).unwrap());
+        cx.run_until_parked();
+        cx.update_window(themes.into(), |root, window, cx| {
+            window.render_frame(cx);
+            let view = root.downcast::<Root>().unwrap().read(cx).view().clone();
+            let view = view.downcast::<super::ThemesView>().unwrap();
+            let select = view.read(cx).dark_theme.read(cx);
+            assert_eq!(select.selected_value().map(String::as_str), Some("Dracula"));
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let names = super::themes_for(super::ThemeMode::Dark, cx);
+            for name in ["Default Dark", "My Dark", "Dracula"] {
+                assert!(
+                    names.iter().any(|n| n == name),
+                    "{name} missing from {names:?}"
+                );
+            }
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[gpui_kit::test]
     fn picking_a_theme_applies_it(cx: &mut TestAppContext) {
         open(cx);
         cx.update(|cx| {
-            // Every bundled theme loaded.
+            // Every bundled theme is offered.
             let builtin: super::ThemeSet = serde_json::from_str(super::BUILTIN_THEMES).unwrap();
-            let themes = super::ThemeRegistry::global(cx).themes();
-            assert!(builtin.themes.iter().all(|t| themes.contains_key(&t.name)));
+            let names = [super::ThemeMode::Light, super::ThemeMode::Dark]
+                .map(|mode| super::themes_for(mode, cx))
+                .concat();
+            assert!(
+                builtin
+                    .themes
+                    .iter()
+                    .all(|t| names.contains(&t.name.to_string()))
+            );
 
             // The starter file loads as two new themes.
             let example: super::ThemeSet = serde_json::from_str(&super::example_theme(cx)).unwrap();
