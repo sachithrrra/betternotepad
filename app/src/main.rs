@@ -12,7 +12,7 @@ use encoding::{Encoding, Eol, decode, encode};
 use export::ExportFormat;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, IndexPath, Root, Selectable as _, Sizable as _, Theme, ThemeConfig,
-    ThemeMode, WindowExt as _,
+    ThemeMode, ThemeRegistry, ThemeSet, WindowExt as _,
     button::{Button, ButtonGroup, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
     h_flex,
@@ -118,24 +118,60 @@ const DEFAULT_FONT: &str = "Lilex";
 const LINE_SPACING: f32 = 1.45;
 const FONT_SIZES: [u32; 16] = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
 
-/// App-wide preferences, shared by every window.
-#[derive(Clone)]
+/// Bundled themes; JSON files in the themes folder add more or replace these by name.
+const BUILTIN_THEMES: &str = include_str!("../themes/builtin.json");
+/// The kit's default themes, shown in our own palette (see `default_theme`).
+const LIGHT_THEME: &str = "Default Light";
+const DARK_THEME: &str = "Default Dark";
+
+/// App-wide preferences, shared by every window and saved as they change.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct Settings {
     appearance: Appearance,
+    /// Theme names, used in light and dark mode.
+    light_theme: SharedString,
+    dark_theme: SharedString,
     word_wrap: bool,
     status_bar: bool,
     font_family: SharedString,
     /// Font size in points.
     font_size: f32,
     /// Most recently opened or saved files, newest first.
+    #[serde(skip)]
     recent: Vec<PathBuf>,
 }
 impl Global for Settings {}
 
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            appearance: Appearance::System,
+            light_theme: LIGHT_THEME.into(),
+            dark_theme: DARK_THEME.into(),
+            word_wrap: true,
+            status_bar: true,
+            font_family: DEFAULT_FONT.into(),
+            font_size: 12.,
+            recent: Vec::new(),
+        }
+    }
+}
+
+impl Settings {
+    fn theme(&self, mode: ThemeMode) -> &SharedString {
+        if mode.is_dark() {
+            &self.dark_theme
+        } else {
+            &self.light_theme
+        }
+    }
+}
+
 struct Updater(updater::Controller);
 impl Global for Updater {}
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum Appearance {
     System,
     Light,
@@ -164,6 +200,35 @@ fn support_dir() -> Option<PathBuf> {
 
 fn recent_file() -> Option<PathBuf> {
     Some(support_dir()?.join("recent.txt"))
+}
+
+fn settings_file() -> Option<PathBuf> {
+    Some(support_dir()?.join("settings.json"))
+}
+
+/// JSON theme files here are picked up, and reloaded, as they change.
+fn themes_dir() -> Option<PathBuf> {
+    Some(support_dir()?.join("themes"))
+}
+
+fn load_settings() -> Settings {
+    let settings: Settings = settings_file()
+        .and_then(|file| std::fs::read(file).ok())
+        .and_then(|json| serde_json::from_slice(&json).ok())
+        .unwrap_or_default();
+    Settings {
+        recent: load_recent(),
+        ..settings
+    }
+}
+
+fn save_settings(cx: &mut App) {
+    if let Some(file) = settings_file()
+        && let Ok(json) = serde_json::to_string_pretty(cx.global::<Settings>())
+    {
+        let _ = std::fs::create_dir_all(file.parent().unwrap());
+        let _ = std::fs::write(file, json);
+    }
 }
 
 /// On first launch (no support dir yet), writes the welcome notes there and
@@ -323,9 +388,11 @@ fn remember_recent(path: &Path, cx: &mut App) {
     });
 }
 
-/// Applies the chosen theme to every window.
+/// Applies the chosen themes to every window. A theme whose background is
+/// translucent turns the windows to frosted glass.
 fn apply_appearance(cx: &mut App) {
-    let dark = match cx.global::<Settings>().appearance {
+    let settings = cx.global::<Settings>();
+    let dark = match settings.appearance {
         Appearance::Light => false,
         Appearance::Dark => true,
         Appearance::System => matches!(
@@ -333,6 +400,17 @@ fn apply_appearance(cx: &mut App) {
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ),
     };
+    // The default, or a theme file that's gone (or not loaded yet), is our palette.
+    let registry = ThemeRegistry::global(cx);
+    let pick = |name: &SharedString, mode| match registry.themes().get(name) {
+        Some(theme) if !theme.is_default => theme.clone(),
+        _ => default_theme(mode, registry),
+    };
+    let light = pick(&settings.light_theme, ThemeMode::Light);
+    let dark_theme = pick(&settings.dark_theme, ThemeMode::Dark);
+    let theme = Theme::global_mut(cx);
+    theme.light_theme = light;
+    theme.dark_theme = dark_theme;
     Theme::change(
         if dark {
             ThemeMode::Dark
@@ -342,6 +420,19 @@ fn apply_appearance(cx: &mut App) {
         None,
         cx,
     );
+    let backdrop = if cx.theme().background.a < 1. {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        WindowBackgroundAppearance::Opaque
+    };
+    // Deferred: this often runs inside a window's own update, which can't update itself.
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            let _ = window.update(cx, |_, window, _| {
+                window.set_background_appearance(backdrop)
+            });
+        }
+    });
     cx.refresh_windows();
 }
 
@@ -1079,7 +1170,6 @@ impl Notepad {
             .border_1()
             .border_color(theme.border)
             .rounded(theme.radius)
-            .shadow_md()
             .children(matches.iter().enumerate().map(|(row, &ix)| {
                 let (label, _, insert) = BLOCKS[ix];
                 let hint = insert.lines().next().unwrap_or_default().trim();
@@ -1175,8 +1265,8 @@ impl Notepad {
             )
     }
 
-    /// The in-window menu bar: a soft gradient with the same 1px divider below as
-    /// every other bar (the tab bar above draws its own).
+    /// The in-window menu bar: flat, with the same 1px divider below as every
+    /// other bar (the tab bar above draws its own).
     fn render_menu_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let settings = cx.global::<Settings>().clone();
         // Edit commands (Undo, Copy…) must reach the text area, not the menu.
@@ -1189,11 +1279,7 @@ impl Notepad {
             .h(px(38.))
             .px_2()
             .gap_1()
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(theme.popover, 0.),
-                linear_color_stop(theme.secondary, 1.),
-            ))
+            .bg(theme.secondary)
             .border_b_1()
             .border_color(theme.border)
             .children(
@@ -1336,7 +1422,6 @@ impl Render for Notepad {
             .id("notepad")
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(theme.background)
             .text_color(theme.foreground)
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.open_paths(paths.paths().to_vec(), window, cx);
@@ -1626,73 +1711,132 @@ fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// Lilex everywhere plus a calmer palette, layered over the kit's default
-/// light/dark themes so every unset color keeps its fallback.
-fn install_theme(cx: &mut App) {
-    macro_rules! style {
-        ($base:expr, { $($field:ident: $hex:literal),* $(,)? }) => {{
-            let mut config: ThemeConfig = (*$base).clone();
-            config.font_family = Some(DEFAULT_FONT.into());
-            config.mono_font_family = Some(DEFAULT_FONT.into());
-            config.font_size = Some(15.);
-            config.mono_font_size = Some(13.);
-            config.radius = Some(6);
-            config.radius_lg = Some(10);
-            $(config.colors.$field = Some($hex.into());)*
-            Rc::new(config)
-        }};
+/// Bundled themes plus the themes folder's JSON files, which reload live as
+/// they're edited; a file theme named like a bundled one replaces it.
+fn install_themes(cx: &mut App) {
+    // A reload keeps only the kit's defaults and the folder's files, so put the
+    // bundled themes back, then re-apply: the chosen theme may have changed.
+    cx.observe_global::<ThemeRegistry>(|cx| {
+        let themes = ThemeRegistry::global(cx).themes();
+        let builtin: ThemeSet = serde_json::from_str(BUILTIN_THEMES).expect("bundled themes");
+        if builtin.themes.iter().all(|t| themes.contains_key(&t.name)) {
+            apply_appearance(cx);
+        } else {
+            add_builtin_themes(cx);
+        }
+    })
+    .detach();
+    add_builtin_themes(cx);
+    if let Some(dir) = themes_dir() {
+        let _ = ThemeRegistry::watch_dir(dir, cx, |_| {});
     }
+    apply_appearance(cx);
+}
 
-    let theme = Theme::global_mut(cx);
-    theme.light_theme = style!(theme.light_theme, {
-        background: "#ffffff",
-        foreground: "#1f2328",
-        border: "#e4e4e7",
-        input: "#d4d4d8",
-        muted_foreground: "#6b7280",
-        primary: "#2563eb",
-        primary_hover: "#1d4ed8",
-        primary_foreground: "#ffffff",
-        secondary: "#f4f4f5",
-        accent: "#e8eefc",
-        accent_foreground: "#1e3a8a",
-        popover: "#ffffff",
-        selection: "#2563eb40",
-        caret: "#2563eb",
-        ring: "#2563eb",
-        tab_bar: "#f4f4f5",
-        tab: "#f4f4f5",
-        tab_active: "#ffffff",
-        tab_foreground: "#71717a",
-        tab_active_foreground: "#18181b",
-    });
-    theme.dark_theme = style!(theme.dark_theme, {
-        background: "#1e1f22",
-        foreground: "#e4e4e7",
-        border: "#2e3035",
-        input: "#3a3d44",
-        muted_foreground: "#9ca3af",
-        primary: "#4c8dff",
-        primary_hover: "#3b7bf0",
-        primary_foreground: "#ffffff",
-        secondary: "#18191c",
-        // Open menu-bar button (selected ghost); derived from `secondary` it's near-black.
-        secondary_active: "#3a3d44",
-        // Menu/list highlight: a clear blue like macOS, not a muddy navy.
-        accent: "#3867d6",
-        accent_foreground: "#ffffff",
-        popover: "#25262a",
-        selection: "#4c8dff4d",
-        caret: "#4c8dff",
-        ring: "#4c8dff",
-        tab_bar: "#18191c",
-        tab: "#18191c",
-        tab_active: "#1e1f22",
-        tab_foreground: "#8b8f98",
-        tab_active_foreground: "#f4f4f5",
-    });
-    let mode = theme.mode;
-    Theme::change(mode, None, cx);
+/// Lilex everywhere plus a calmer palette, layered over the kit's default theme
+/// for `mode` so every unset color keeps its fallback.
+fn default_theme(mode: ThemeMode, registry: &ThemeRegistry) -> Rc<ThemeConfig> {
+    let mut config: ThemeConfig = (*registry.default_themes()[&mode]).clone();
+    config.font_family = Some(DEFAULT_FONT.into());
+    config.mono_font_family = Some(DEFAULT_FONT.into());
+    config.font_size = Some(15.);
+    config.mono_font_size = Some(13.);
+    config.radius = Some(6);
+    config.radius_lg = Some(10);
+    config.shadow = Some(false);
+    macro_rules! colors {
+        ($($field:ident: $hex:literal),* $(,)?) => { $(config.colors.$field = Some($hex.into());)* };
+    }
+    if mode.is_dark() {
+        colors! {
+            background: "#1e1f22",
+            foreground: "#e4e4e7",
+            border: "#2e3035",
+            input: "#3a3d44",
+            muted_foreground: "#9ca3af",
+            primary: "#4c8dff",
+            primary_hover: "#3b7bf0",
+            primary_foreground: "#ffffff",
+            secondary: "#18191c",
+            // Open menu-bar button (selected ghost); derived from `secondary` it's near-black.
+            secondary_active: "#3a3d44",
+            // Menu/list highlight: a clear blue like macOS, not a muddy navy.
+            accent: "#3867d6",
+            accent_foreground: "#ffffff",
+            popover: "#25262a",
+            selection: "#4c8dff4d",
+            caret: "#4c8dff",
+            ring: "#4c8dff",
+            tab_bar: "#18191c",
+            tab: "#18191c",
+            tab_active: "#1e1f22",
+            tab_foreground: "#8b8f98",
+            tab_active_foreground: "#f4f4f5",
+        }
+    } else {
+        colors! {
+            background: "#ffffff",
+            foreground: "#1f2328",
+            border: "#e4e4e7",
+            input: "#d4d4d8",
+            muted_foreground: "#6b7280",
+            primary: "#2563eb",
+            primary_hover: "#1d4ed8",
+            primary_foreground: "#ffffff",
+            secondary: "#f4f4f5",
+            accent: "#e8eefc",
+            accent_foreground: "#1e3a8a",
+            popover: "#ffffff",
+            selection: "#2563eb40",
+            caret: "#2563eb",
+            ring: "#2563eb",
+            tab_bar: "#f4f4f5",
+            tab: "#f4f4f5",
+            tab_active: "#ffffff",
+            tab_foreground: "#71717a",
+            tab_active_foreground: "#18181b",
+        }
+    }
+    Rc::new(config)
+}
+
+/// A starter theme file: the default light and dark themes with every key
+/// spelled out, renamed so editing them doesn't touch the default.
+fn example_theme(cx: &App) -> String {
+    let registry = ThemeRegistry::global(cx);
+    let themes =
+        [(ThemeMode::Light, "My Light"), (ThemeMode::Dark, "My Dark")].map(|(mode, name)| {
+            let mut theme = (*default_theme(mode, registry)).clone();
+            theme.is_default = false;
+            theme.name = name.into();
+            theme
+        });
+    let set = ThemeSet {
+        name: "My Theme".into(),
+        themes: themes.to_vec(),
+        ..Default::default()
+    };
+    let mut json = serde_json::to_value(set).expect("theme serializes");
+    strip_nulls(&mut json);
+    serde_json::to_string_pretty(&json).expect("theme serializes")
+}
+
+/// Unset keys serialize as `null`; leave them out so only real values show.
+fn strip_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            map.values_mut().for_each(strip_nulls);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_nulls),
+        _ => {}
+    }
+}
+
+fn add_builtin_themes(cx: &mut App) {
+    ThemeRegistry::global_mut(cx)
+        .load_themes_from_str(BUILTIN_THEMES)
+        .expect("bundled themes");
 }
 
 /// Lilex isn't a system font, so it ships inside the binary (OFL, see fonts/OFL.txt).
@@ -1716,15 +1860,9 @@ fn load_fonts(cx: &App) {
 fn init(cx: &mut App) {
     gpui_kit::init(cx);
     load_fonts(cx);
-    install_theme(cx);
-    cx.set_global(Settings {
-        appearance: Appearance::System,
-        word_wrap: true,
-        status_bar: true,
-        font_family: DEFAULT_FONT.into(),
-        font_size: 12.,
-        recent: load_recent(),
-    });
+    cx.set_global(load_settings());
+    cx.observe_global::<Settings>(save_settings).detach();
+    install_themes(cx);
     bind_keys(cx);
     set_menus(cx);
     cx.set_global(Updater(updater::start()));
@@ -1889,9 +2027,19 @@ fn open_single<V: Render>(
 fn open_settings(cx: &mut App) {
     open_single(
         "Settings",
-        size(px(560.), px(520.)),
+        size(px(560.), px(580.)),
         true,
         SettingsView::new,
+        cx,
+    );
+}
+
+fn open_themes(cx: &mut App) {
+    open_single(
+        "Themes",
+        size(px(560.), px(360.)),
+        true,
+        ThemesView::new,
         cx,
     );
 }
@@ -1917,7 +2065,6 @@ impl Render for AboutView {
             .justify_center()
             .gap_1()
             .p_6()
-            .bg(theme.background)
             .text_color(theme.foreground)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .child(
@@ -1942,10 +2089,48 @@ impl Render for AboutView {
     }
 }
 
+type ThemeSelect = Entity<SelectState<SearchableVec<String>>>;
+
 struct SettingsView {
     font_family: Entity<SelectState<SearchableVec<String>>>,
     font_size: Entity<SelectState<Vec<String>>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Names of the loaded themes for `mode`, and where the chosen one is among them.
+fn theme_names(mode: ThemeMode, cx: &App) -> (SearchableVec<String>, Option<IndexPath>) {
+    let names: Vec<String> = ThemeRegistry::global(cx)
+        .sorted_themes()
+        .into_iter()
+        .filter(|t| t.mode == mode)
+        .map(|t| t.name.to_string())
+        .collect();
+    let chosen = cx.global::<Settings>().theme(mode);
+    let ix = names.iter().position(|n| n == chosen);
+    (SearchableVec::new(names), ix.map(IndexPath::new))
+}
+
+fn theme_select(
+    mode: ThemeMode,
+    window: &mut Window,
+    cx: &mut Context<ThemesView>,
+) -> (ThemeSelect, Subscription) {
+    let (names, ix) = theme_names(mode, cx);
+    let select = cx.new(|cx| SelectState::new(names, ix, window, cx).searchable(true));
+    let subscription = cx.subscribe(
+        &select,
+        move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+            if let SelectEvent::Confirm(Some(name)) = event {
+                let name = SharedString::from(name.clone());
+                cx.update_global::<Settings, _>(|s, _| match mode {
+                    ThemeMode::Dark => s.dark_theme = name,
+                    ThemeMode::Light => s.light_theme = name,
+                });
+                apply_appearance(cx);
+            }
+        },
+    );
+    (select, subscription)
 }
 
 impl SettingsView {
@@ -1996,6 +2181,95 @@ impl SettingsView {
             font_size,
             _subscriptions: subscriptions,
         }
+    }
+}
+
+struct ThemesView {
+    light_theme: ThemeSelect,
+    dark_theme: ThemeSelect,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl ThemesView {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (light_theme, light_sub) = theme_select(ThemeMode::Light, window, cx);
+        let (dark_theme, dark_sub) = theme_select(ThemeMode::Dark, window, cx);
+        let subscriptions = vec![
+            light_sub,
+            dark_sub,
+            // Theme files come and go while the window is open.
+            cx.observe_global_in::<ThemeRegistry>(window, |this: &mut Self, window, cx| {
+                for (mode, select) in [
+                    (ThemeMode::Light, this.light_theme.clone()),
+                    (ThemeMode::Dark, this.dark_theme.clone()),
+                ] {
+                    let (names, ix) = theme_names(mode, cx);
+                    select.update(cx, |select, cx| {
+                        select.set_items(names, window, cx);
+                        select.set_selected_index(ix, window, cx);
+                    });
+                }
+            }),
+        ];
+        Self {
+            light_theme,
+            dark_theme,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl Render for ThemesView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("themes")
+            .size_full()
+            .p_5()
+            .gap_2()
+            .text_color(cx.theme().foreground)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            // Clears the focus ring a Select trigger keeps after Confirm (see SettingsView).
+            .on_click(|_, window, cx| window.blur(cx))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .pb_2()
+                    .child("Themes"),
+            )
+            .child(setting_row(
+                "Light theme",
+                "Colors in light mode",
+                div().w(px(180.)).child(Select::new(&self.light_theme)),
+                cx,
+            ))
+            .child(setting_row(
+                "Dark theme",
+                "Colors in dark mode",
+                div().w(px(180.)).child(Select::new(&self.dark_theme)),
+                cx,
+            ))
+            .child(setting_row(
+                "Custom themes",
+                "JSON theme files here apply as you save them",
+                Button::new("themes-folder")
+                    .outline()
+                    .small()
+                    .label("Open Folder")
+                    .on_click(|_, _, cx| {
+                        let Some(dir) = themes_dir() else { return };
+                        let _ = std::fs::create_dir_all(&dir);
+                        // With no theme of their own yet, start them off with one to edit.
+                        let has_theme = std::fs::read_dir(&dir).into_iter().flatten().any(|e| {
+                            e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "json"))
+                        });
+                        if !has_theme {
+                            let _ = std::fs::write(dir.join("my-theme.json"), example_theme(cx));
+                        }
+                        cx.open_with_system(&dir);
+                    }),
+                cx,
+            ))
     }
 }
 
@@ -2053,7 +2327,6 @@ impl Render for SettingsView {
             .size_full()
             .p_5()
             .gap_2()
-            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             // Controls stop propagation on their own clicks, so this only fires for
@@ -2084,6 +2357,16 @@ impl Render for SettingsView {
                         cx.update_global::<Settings, _>(|s, _| s.appearance = appearance);
                         apply_appearance(cx);
                     }),
+                cx,
+            ))
+            .child(setting_row(
+                "Themes",
+                "Colors for light and dark mode",
+                Button::new("themes")
+                    .outline()
+                    .small()
+                    .label("Customize…")
+                    .on_click(|_, _, cx| open_themes(cx)),
                 cx,
             ))
             .child(setting_row(
@@ -2149,6 +2432,8 @@ fn main() {
     if let Ok(out) = std::env::var("NP_SNAPSHOT") {
         return snapshot(&out, paths);
     }
+    // Before `init`, which creates the support dir (for the themes folder).
+    let welcome = first_run_welcome();
     let (open_tx, open_rx) = async_channel::unbounded::<Vec<PathBuf>>();
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     // Like other Mac document apps, closing the last window leaves the app running;
@@ -2188,7 +2473,7 @@ fn main() {
                     .timer(Duration::from_millis(100))
                     .await;
                 if !opened.replace(true) {
-                    cx.update(|cx| open_window(first_run_welcome(), cx));
+                    cx.update(|cx| open_window(welcome, cx));
                 }
             })
             .detach();
@@ -2267,7 +2552,7 @@ fn snapshot(out: &str, paths: Vec<PathBuf>) {
 #[cfg(test)]
 mod ui_tests {
     use super::{About, CloseTab, Encoding, GoTo, NewTab, Notepad, Quit, init};
-    use gpui_kit::component::{Root, WindowExt as _};
+    use gpui_kit::component::{ActiveTheme as _, Root, WindowExt as _};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, ElementId, Entity, TestAppContext, px, size};
 
@@ -2282,6 +2567,33 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
             .unwrap();
         (handle.into(), notepad.unwrap())
+    }
+
+    #[gpui_kit::test]
+    fn picking_a_theme_applies_it(cx: &mut TestAppContext) {
+        open(cx);
+        cx.update(|cx| {
+            // Every bundled theme loaded.
+            let builtin: super::ThemeSet = serde_json::from_str(super::BUILTIN_THEMES).unwrap();
+            let themes = super::ThemeRegistry::global(cx).themes();
+            assert!(builtin.themes.iter().all(|t| themes.contains_key(&t.name)));
+
+            // The starter file loads as two new themes.
+            let example: super::ThemeSet = serde_json::from_str(&super::example_theme(cx)).unwrap();
+            let names: Vec<_> = example.themes.iter().map(|t| t.name.as_ref()).collect();
+            assert_eq!(names, ["My Light", "My Dark"]);
+
+            // The default is our own palette, not the kit's.
+            cx.global_mut::<super::Settings>().appearance = super::Appearance::Dark;
+            super::apply_appearance(cx);
+            let default: gpui_kit::Hsla = gpui_kit::rgb(0x1e1f22).into();
+            assert_eq!(cx.theme().background, default);
+
+            cx.global_mut::<super::Settings>().dark_theme = "Dracula".into();
+            super::apply_appearance(cx);
+            let dracula: gpui_kit::Hsla = gpui_kit::rgb(0x282a36).into();
+            assert_eq!(cx.theme().background, dracula);
+        });
     }
 
     #[gpui_kit::test]
